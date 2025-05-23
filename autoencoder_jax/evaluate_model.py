@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import serialization
 
 from autoencoder import SpectrumAutoencoder, TrainState
-from grids import SpectralDatasetJAX
+from grids_jax import SpectralDatasetJAX
 
 
 def load_model(model_path, model_params):
@@ -95,9 +95,11 @@ def plot_reconstruction(model, state, test_ds, num_samples=4):
 
 def main():
     # Load test dataset
-    grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetJAX(f'{grid_dir}/bc03-2016-Miles_chabrier-0.1,100.hdf5')
-    
+    spec_type='stellar'  # 'incident'
+    # grid_dir = '../../synthesizer_grids/grids/'
+    grid_dir = '../../synthesizer_data/grids/'
+    # dataset = SpectralDatasetJAX(f'{grid_dir}/bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    dataset = SpectralDatasetJAX(f'{grid_dir}/bc03_chabrier03-0.1,100.hdf5', spec_type=spec_type)    
     # Split dataset (using same split as training)
     rng = jax.random.PRNGKey(0)
     rng, split_rng = jax.random.split(rng)

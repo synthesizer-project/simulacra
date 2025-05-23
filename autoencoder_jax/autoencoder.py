@@ -11,7 +11,7 @@ from typing import Sequence
 from flax.training import train_state
 from flax import serialization
 
-from grids import SpectralDatasetJAX
+from grids_jax import SpectralDatasetJAX
 
 
 # === Model Architecture ===
@@ -295,8 +295,11 @@ def main():
     rng = jax.random.PRNGKey(0)
     
     # Load dataset
-    grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetJAX(f'{grid_dir}/bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    spec_type='stellar'  # 'incident'
+    # grid_dir = '../../synthesizer_grids/grids/'
+    grid_dir = '../../synthesizer_data/grids/'
+    # dataset = SpectralDatasetJAX(f'{grid_dir}/bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    dataset = SpectralDatasetJAX(f'{grid_dir}/bc03_chabrier03-0.1,100.hdf5', spec_type=spec_type)
     
     rng, split_rng = jax.random.split(rng)
     perm = jax.random.permutation(split_rng, len(dataset))
