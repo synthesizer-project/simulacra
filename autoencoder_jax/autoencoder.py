@@ -30,13 +30,12 @@ class SpectrumEncoder(nn.Module):
         x = nn.Dense(self.latent_dim, kernel_init=nn.initializers.he_normal())(x)
         return x
 
-class ConditionalDecoder(nn.Module):
+class SpectrumDecoder(nn.Module):
     features: Sequence[int] = (256, 512, 1024)
     spectrum_dim: int = 10787
     
     @nn.compact
-    def __call__(self, latent, params, training: bool = True):
-        x = jnp.concatenate([latent, params], axis=-1)
+    def __call__(self, x, training: bool = True):
         for feat in self.features:
             x = nn.Dense(feat, kernel_init=nn.initializers.he_normal())(x)
             x = nn.BatchNorm(use_running_average=not training, momentum=0.9)(x)
@@ -49,21 +48,20 @@ class ConditionalDecoder(nn.Module):
 class SpectrumAutoencoder(nn.Module):
     spectrum_dim: int
     latent_dim: int
-    param_dim: int
     
     def setup(self):
         self.encoder = SpectrumEncoder(latent_dim=self.latent_dim)
-        self.decoder = ConditionalDecoder(spectrum_dim=self.spectrum_dim)
+        self.decoder = SpectrumDecoder(spectrum_dim=self.spectrum_dim)
     
     def encode(self, spectrum, training: bool = True):
         return self.encoder(spectrum, training=training)
     
-    def decode(self, latent, params, training: bool = True):
-        return self.decoder(latent, params, training=training)
+    def decode(self, latent, training: bool = True):
+        return self.decoder(latent, training=training)
     
-    def __call__(self, spectrum, params, training: bool = True):
+    def __call__(self, spectrum, training: bool = True):
         latent = self.encode(spectrum, training=training)
-        return self.decode(latent, params, training=training)
+        return self.decode(latent, training=training)
 
 # === Training State ===
 class TrainState(train_state.TrainState):
@@ -84,7 +82,7 @@ class TrainState(train_state.TrainState):
 def create_train_state(rng, model, learning_rate):
     """Creates initial training state."""
     rng, init_rng = jax.random.split(rng)
-    variables = model.init(init_rng, jnp.ones((1, model.spectrum_dim)), jnp.ones((1, model.param_dim)))
+    variables = model.init(init_rng, jnp.ones((1, model.spectrum_dim)))
     params = variables['params']
     batch_stats = variables['batch_stats']
     
@@ -111,11 +109,11 @@ def create_train_state(rng, model, learning_rate):
 def train_step(state, batch, rng):
     """Performs a single training step."""
     def loss_fn(params, rng):
-        spectrum, params_input = batch
+        spectrum = batch
         variables = {'params': params, 'batch_stats': state.batch_stats}
         rng, dropout_rng = jax.random.split(rng)
         pred_spectrum, new_model_state = state.apply_fn(
-            variables, spectrum, params_input,
+            variables, spectrum,
             mutable=['batch_stats'],
             training=True,
             rngs={'dropout': dropout_rng}
@@ -137,10 +135,10 @@ def train_step(state, batch, rng):
 @jax.jit
 def eval_step(state, batch):
     """Performs a single evaluation step."""
-    spectrum, params_input = batch
+    spectrum = batch
     variables = {'params': state.params, 'batch_stats': state.batch_stats}
     pred_spectrum = state.apply_fn(
-        variables, spectrum, params_input,
+        variables, spectrum,
         training=False
     )
     loss = jnp.mean((pred_spectrum - spectrum) ** 2)
@@ -158,7 +156,7 @@ def train_epoch(state, train_ds, batch_size, rng):
     epoch_loss = []
     
     for perm in perms:
-        batch = (train_ds.spectra[perm], train_ds.conditions[perm])
+        batch = train_ds.spectra[perm]
         rng, step_rng = jax.random.split(rng)
         state, loss = train_step(state, batch, step_rng)
         epoch_loss.append(loss)
@@ -174,10 +172,7 @@ def eval_model(state, test_ds, batch_size):
     all_losses = []
     
     for i in range(steps_per_epoch):
-        batch = (
-            test_ds.spectra[i * batch_size:(i + 1) * batch_size],
-            test_ds.conditions[i * batch_size:(i + 1) * batch_size]
-        )
+        batch = test_ds.spectra[i * batch_size:(i + 1) * batch_size]
         loss = eval_step(state, batch)
         all_losses.append(loss)
     
@@ -249,6 +244,7 @@ def train_and_evaluate(
                 if new_lr != current_lr:
                     print(f"Reducing learning rate from {current_lr:.2e} to {new_lr:.2e}")
                     current_lr = new_lr
+                    lr_no_improve_epochs = 0
                     # Update optimizer with new learning rate
                     tx = optax.chain(
                         optax.clip_by_global_norm(1.0),
@@ -261,86 +257,68 @@ def train_and_evaluate(
                         )
                     )
                     state = state.replace(tx=tx)
-                    lr_no_improve_epochs = 0
         
+        # Early stopping
         if no_improve_epochs >= patience:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-            print(f"Best loss: {best_test_loss:.4f} at epoch {best_epoch + 1}")
+            print(f"Best test loss: {best_test_loss:.4f} at epoch {best_epoch + 1}")
             break
-            
+    
     return state, train_losses, test_losses
 
 def main():
     # Check for available devices
-    devices = jax.devices()
-    print(f"Available devices: {devices}")
-    print(f"Using device: {jax.default_backend()}")
-    
-    # Configure JAX memory settings
-    jax.config.update('jax_platform_name', 'gpu')  # Force GPU usage if available
-    # jax.config.update('jax_default_matmul_precision', jax.lax.Precision.HIGHEST)
-    
-    # Hyperparameters
-    latent_dim = 128
-    batch_size = 128  # Increased from 32 for better GPU utilization
-    num_epochs = 50
-    learning_rate = 1e-3
-    early_stopping_patience = 10
-    early_stopping_min_delta = 1e-4
-    lr_patience = 3
-    lr_factor = 0.5
-    min_lr = 1e-7
-    
-    # Initialize RNG
-    rng = jax.random.PRNGKey(0)
+    print(f"JAX devices: {jax.devices()}")
     
     # Load dataset
+    N_samples = int(1e4)
     spec_type='stellar'  # 'incident'
-    # grid_dir = '../../synthesizer_grids/grids/'
+    # grid_dir = '/home/chris/code/synthesizer_grids/grids/'
     grid_dir = '../../synthesizer_data/grids/'
-    # dataset = SpectralDatasetJAX(f'{grid_dir}/bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    # dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5', num_samples=N_samples)
     dataset = SpectralDatasetJAX(f'{grid_dir}/bc03_chabrier03-0.1,100.hdf5', spec_type=spec_type)
     
+    # Split dataset
+    rng = jax.random.PRNGKey(0)
     rng, split_rng = jax.random.split(rng)
     perm = jax.random.permutation(split_rng, len(dataset))
     split = int(0.8 * len(dataset))
-    train_dataset = SpectralDatasetJAX(parent_dataset=dataset, split=perm[:split])
-    val_dataset = SpectralDatasetJAX(parent_dataset=dataset, split=perm[split:])
+    
+    train_dataset = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[:split])
+    test_dataset = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[split:])
     
     # Create model
     model = SpectrumAutoencoder(
         spectrum_dim=train_dataset.n_wavelength,
-        latent_dim=latent_dim,
-        param_dim=train_dataset.conditions.shape[1]
+        latent_dim=128  # This is a hyperparameter we choose
     )
+    
+    # Training parameters
+    num_epochs = 100
+    batch_size = 32
+    learning_rate = 1e-3
     
     # Train model
     state, train_losses, test_losses = train_and_evaluate(
-        model,
-        train_dataset,
-        val_dataset,
-        num_epochs,
-        batch_size,
-        learning_rate,
-        rng,
-        patience=early_stopping_patience,
-        min_delta=early_stopping_min_delta,
-        lr_patience=lr_patience,
-        lr_factor=lr_factor,
-        min_lr=min_lr
+        model=model,
+        train_ds=train_dataset,
+        test_ds=test_dataset,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        rng=rng
     )
     
-    # Plot training history
-    plt.figure(figsize=(10, 6))
-    plt.plot(np.log10(train_losses), label='Training Loss')
-    plt.plot(np.log10(test_losses), label='Test Loss')
+    # Plot training curves
+    plt.figure(figsize=(10, 4))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(test_losses, label='Test Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Log10 Loss')
-    plt.title('Training History')
+    plt.ylabel('Loss')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig('figures/autoencoder_training_history.png', dpi=300, bbox_inches='tight')
+    plt.savefig('figures/autoencoder_training_curves.png', dpi=300, bbox_inches='tight')
     plt.close()
-    
+
 if __name__ == "__main__":
     main() 
