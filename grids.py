@@ -48,7 +48,15 @@ class SpectralDataset(Dataset):
     
 
 class SpectralDatasetJAX:
-    def __init__(self, h5_path='example_grid.hdf5', parent_dataset=None, split=None):
+    def __init__(
+        self,
+        h5_path='example_grid.hdf5',
+        spec_type='incident',
+        parent_dataset=None,
+        split=None,
+        ages='log10age',
+        metallicity='metallicity',
+    ):
 
         if parent_dataset is not None:
             self.spectra = parent_dataset.spectra
@@ -61,10 +69,10 @@ class SpectralDatasetJAX:
             self.n_met = parent_dataset.n_met
         else:
             with h5py.File(h5_path, 'r') as f:
-                self.spectra = jnp.array(f['spectra/incident'][:], dtype=jnp.float32)
+                self.spectra = jnp.array(f[f'spectra/{spec_type}'][:], dtype=jnp.float32)
                 self.wavelength = jnp.array(f['spectra/wavelength'][:], dtype=jnp.float32)
-                self.ages = jnp.array(f['axes/ages'][:], dtype=jnp.float32)
-                self.metallicities = jnp.array(f['axes/metallicities'][:], dtype=jnp.float32)
+                self.ages = jnp.array(f[f'axes/{ages}'][:], dtype=jnp.float32)
+                self.metallicities = jnp.array(f[f'axes/{metallicity}'][:], dtype=jnp.float32)
 
             # Filter spectra and wavelength
             mask = (self.wavelength > 1000) & (self.wavelength < 10000)
