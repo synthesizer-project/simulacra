@@ -318,7 +318,7 @@ def plot_training_history(train_metrics: Dict[str, list], val_metrics: Dict[str,
 def main():
     # Load dataset
     grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5', num_samples=int(1e4))
     
     # Split dataset
     rng = jax.random.PRNGKey(0)

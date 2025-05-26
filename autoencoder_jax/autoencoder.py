@@ -11,7 +11,7 @@ from typing import Sequence
 from flax.training import train_state
 from flax import serialization
 
-from grids_jax import SpectralDatasetJAX
+from grids import SpectralDatasetSynthesizer
 
 
 # === Model Architecture ===
@@ -122,24 +122,24 @@ def train_step(state, batch, rng):
         l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
         reconstruction_loss = jnp.mean((pred_spectrum - spectrum) ** 2)
         loss = reconstruction_loss + 1e-4 * l2_loss
-        return loss, new_model_state
+        return loss, (new_model_state, reconstruction_loss, l2_loss)  # Return components
     
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, new_model_state), grads = grad_fn(state.params, rng)
+    (loss, (new_model_state, recon_loss, l2_loss)), grads = grad_fn(state.params, rng)
     state = state.apply_gradients(
         grads=grads,
         batch_stats=new_model_state['batch_stats']
     )
-    return state, loss
+    return state, loss, recon_loss, l2_loss
 
 @jax.jit
-def eval_step(state, batch):
+def eval_step(state, batch, training=False):
     """Performs a single evaluation step."""
     spectrum = batch
     variables = {'params': state.params, 'batch_stats': state.batch_stats}
     pred_spectrum = state.apply_fn(
         variables, spectrum,
-        training=False
+        training=training  # Allow evaluation in training mode
     )
     loss = jnp.mean((pred_spectrum - spectrum) ** 2)
     return loss
@@ -154,15 +154,22 @@ def train_epoch(state, train_ds, batch_size, rng):
     perms = perms.reshape((steps_per_epoch, batch_size))
     
     epoch_loss = []
+    epoch_recon_loss = []
+    epoch_l2_loss = []
     
     for perm in perms:
         batch = train_ds.spectra[perm]
         rng, step_rng = jax.random.split(rng)
-        state, loss = train_step(state, batch, step_rng)
+        state, loss, recon_loss, l2_loss = train_step(state, batch, step_rng)
         epoch_loss.append(loss)
+        epoch_recon_loss.append(recon_loss)
+        epoch_l2_loss.append(l2_loss)
     
-    train_loss = np.array(jnp.mean(jnp.array(epoch_loss)))
-    return state, train_loss, rng
+    return state, {
+        'total_loss': np.array(jnp.mean(jnp.array(epoch_loss))),
+        'recon_loss': np.array(jnp.mean(jnp.array(epoch_recon_loss))),
+        'l2_loss': np.array(jnp.mean(jnp.array(epoch_l2_loss)))
+    }, rng
 
 def eval_model(state, test_ds, batch_size):
     """Evaluates the model on the test set."""
@@ -209,14 +216,14 @@ def train_and_evaluate(
     
     for epoch in range(num_epochs):
         rng, input_rng = jax.random.split(rng)
-        state, train_loss, rng = train_epoch(state, train_ds, batch_size, input_rng)
+        state, train_losses_epoch, rng = train_epoch(state, train_ds, batch_size, input_rng)
         test_loss = eval_model(state, test_ds, batch_size)
         
-        train_losses.append(train_loss)
+        train_losses.append(train_losses_epoch['total_loss'])
         test_losses.append(test_loss)
         
         print(f"Epoch {epoch + 1}/{num_epochs}")
-        print(f"Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}")
+        print(f"Train Loss: {train_losses_epoch['total_loss']:.4f}, Test Loss: {test_loss:.4f}")
         print(f"Learning Rate: {current_lr:.2e}")
         
         # Early stopping check
@@ -271,12 +278,12 @@ def main():
     print(f"JAX devices: {jax.devices()}")
     
     # Load dataset
-    N_samples = int(1e4)
+    N_samples = int(1e3)
     spec_type='stellar'  # 'incident'
-    # grid_dir = '/home/chris/code/synthesizer_grids/grids/'
-    grid_dir = '../../synthesizer_data/grids/'
-    # dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5', num_samples=N_samples)
-    dataset = SpectralDatasetJAX(f'{grid_dir}/bc03_chabrier03-0.1,100.hdf5', spec_type=spec_type)
+    grid_dir = '/home/chris/code/synthesizer_grids/grids/'
+    # grid_dir = '../../synthesizer_data/grids/'
+    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5', num_samples=N_samples)
+    # dataset = SpectralDatasetJAX(f'{grid_dir}/bc03_chabrier03-0.1,100.hdf5', spec_type=spec_type)
     
     # Split dataset
     rng = jax.random.PRNGKey(0)

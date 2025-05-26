@@ -94,6 +94,10 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
     """Plot spectrum and its gradients with respect to parameters."""
     plt.figure(figsize=(15, 10))
     
+    # Create colormaps for positive and negative values
+    pos_cmap = plt.cm.Reds
+    neg_cmap = plt.cm.Blues
+    
     # Plot spectrum
     plt.subplot(3, 1, 1)
     plt.plot(wavelengths, spectrum, label='Spectrum')
@@ -104,19 +108,77 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
     
     # Plot gradient with respect to age
     plt.subplot(3, 1, 2)
-    plt.plot(wavelengths, gradients[0], label='dS/dAge', color='red')
+    age_grad = gradients[0]
+    plt.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    
+    # Color array for age gradient
+    age_colors = np.zeros((len(wavelengths), 4))  # RGBA array
+    pos_mask = age_grad >= 0
+    neg_mask = age_grad < 0
+    
+    # Normalize values for coloring
+    if np.any(pos_mask):
+        pos_norm = age_grad[pos_mask] / np.max(age_grad[pos_mask])
+        age_colors[pos_mask] = pos_cmap(pos_norm)
+    if np.any(neg_mask):
+        neg_norm = -age_grad[neg_mask] / np.min(age_grad[neg_mask])
+        age_colors[neg_mask] = neg_cmap(neg_norm)
+    
+    # Plot with colored segments
+    for j in range(len(wavelengths)-1):
+        plt.plot(
+            wavelengths[j:j+2],
+            age_grad[j:j+2],
+            color=age_colors[j],
+            linewidth=2,
+            alpha=0.7
+        )
+    
     plt.xlabel('Wavelength (Å)')
     plt.ylabel('Gradient')
     plt.title('Gradient with respect to Age')
-    plt.legend()
+    
+    # Add legend for age gradient
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='black', linestyle='--', label='Zero Gradient'),
+        Line2D([0], [0], color=pos_cmap(0.8), label='Positive Gradient'),
+        Line2D([0], [0], color=neg_cmap(0.8), label='Negative Gradient')
+    ]
+    plt.legend(handles=legend_elements)
     
     # Plot gradient with respect to metallicity
     plt.subplot(3, 1, 3)
-    plt.plot(wavelengths, gradients[1], label='dS/dZ', color='green')
+    met_grad = gradients[1]
+    plt.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    
+    # Color array for metallicity gradient
+    met_colors = np.zeros((len(wavelengths), 4))  # RGBA array
+    pos_mask = met_grad >= 0
+    neg_mask = met_grad < 0
+    
+    # Normalize values for coloring
+    if np.any(pos_mask):
+        pos_norm = met_grad[pos_mask] / np.max(met_grad[pos_mask])
+        met_colors[pos_mask] = pos_cmap(pos_norm)
+    if np.any(neg_mask):
+        neg_norm = -met_grad[neg_mask] / np.min(met_grad[neg_mask])
+        met_colors[neg_mask] = neg_cmap(neg_norm)
+    
+    # Plot with colored segments
+    for j in range(len(wavelengths)-1):
+        plt.plot(
+            wavelengths[j:j+2],
+            met_grad[j:j+2],
+            color=met_colors[j],
+            linewidth=2,
+            alpha=0.7
+        )
+    
     plt.xlabel('Wavelength (Å)')
     plt.ylabel('Gradient')
     plt.title('Gradient with respect to Metallicity')
-    plt.legend()
+    plt.legend(handles=legend_elements)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
