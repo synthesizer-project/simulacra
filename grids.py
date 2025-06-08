@@ -110,39 +110,68 @@ class SpectralDatasetSynthesizer:
     def __init__(self, grid_dir=None, grid_name=None, num_samples=1000, parent_dataset=None, split=None):
 
         if parent_dataset is not None:
+            # Inherit all data and parameters from the parent dataset
             self.spectra = parent_dataset.spectra
             self.wavelength = parent_dataset.wavelength
             self.ages = parent_dataset.ages
             self.metallicities = parent_dataset.metallicities
             self.conditions = parent_dataset.conditions
             self.n_wavelength = parent_dataset.n_wavelength
-            # self.n_age = parent_dataset.n_age
-            # self.n_met = parent_dataset.n_met
-        else:
-            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(grid_dir, grid_name, num_samples)
             
+            # Carry over normalization parameters from the parent
+            self.spec_mean = parent_dataset.spec_mean
+            self.spec_std = parent_dataset.spec_std
+            self.age_mean = parent_dataset.age_mean
+            self.age_std = parent_dataset.age_std
+            self.met_mean = parent_dataset.met_mean
+            self.met_std = parent_dataset.met_std
+            
+        else:
+            # Load raw data if this is a new dataset
+            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(grid_dir, grid_name, num_samples)
             self.n_wavelength = self.spectra.shape[1]
 
+            # --- Pre-computation before any splitting ---
+            # Store normalization params for physical parameters
+            self.age_mean, self.age_std = self.ages.mean(), self.ages.std()
+            self.met_mean, self.met_std = self.metallicities.mean(), self.metallicities.std()
+
+            # Normalize physical parameters
+            norm_ages = (self.ages - self.age_mean) / self.age_std
+            norm_mets = (self.metallicities - self.met_mean) / self.met_std
+            
+            # Create conditions from normalized parameters
+            self.conditions = jnp.stack([norm_ages, norm_mets]).T
+
+            # Reshape and log-transform spectra
+            self.spectra = self.spectra.reshape(-1, self.n_wavelength)
+            self.spectra = jnp.log10(self.spectra)
+
+            # Calculate and store normalization parameters for spectra
+            self.spec_mean = self.spectra.mean(axis=0)
+            self.spec_std = self.spectra.std(axis=0)
+            
+            # Normalize spectra
+            self.spectra = (self.spectra - self.spec_mean) / self.spec_std
+
         if split is not None:
+            # Apply the split to all relevant arrays
             self.spectra = self.spectra[split]
             self.ages = self.ages[split]
             self.metallicities = self.metallicities[split]
             self.conditions = self.conditions[split]
-        
-        if parent_dataset is None:
-            # Normalize parameters
-            self.ages = (self.ages - self.ages.mean()) / self.ages.std()
-            self.metallicities = (self.metallicities - self.metallicities.mean()) / self.metallicities.std()
-            
-            # Create all combinations of parameters
-            self.conditions = jnp.stack([self.ages, self.metallicities]).reshape(2, -1).T
 
-            # Reshape spectra to match conditions
-            self.spectra = self.spectra.reshape(-1, self.n_wavelength)
+    def unnormalize_spectrum(self, spectrum):
+        """Un-normalizes a single spectrum using the stored dataset parameters."""
+        return 10**((spectrum * self.spec_std) + self.spec_mean)
 
-            # Log and normalize spectra
-            self.spectra = jnp.log10(self.spectra)
-            self.spectra = (self.spectra - self.spectra.mean(axis=1, keepdims=True)) / self.spectra.std(axis=1, keepdims=True)
+    def unnormalize_age(self, norm_age):
+        """Un-normalizes a single age value."""
+        return (norm_age * self.age_std) + self.age_mean
+
+    def unnormalize_metallicity(self, norm_met):
+        """Un-normalizes a single metallicity value."""
+        return (norm_met * self.met_std) + self.met_mean
     
     def __len__(self):
         return len(self.conditions)
