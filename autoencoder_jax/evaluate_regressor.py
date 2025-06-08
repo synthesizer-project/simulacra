@@ -4,107 +4,41 @@ sys.path.append('..')
 import numpy as np
 import matplotlib.pyplot as plt
 import jax.numpy as jnp
-from flax import serialization
 from tqdm import tqdm
+import os
+import jax
 
-from autoencoder import SpectrumAutoencoder
-from regressor import RegressorMLP
-from grids import SpectralDatasetSynthesizer
-
-
-def load_models(autoencoder_path, regressor_path, spectrum_dim, latent_dim):
-    """Load trained autoencoder and regressor models."""
-    # Load autoencoder
-    autoencoder = SpectrumAutoencoder(
-        spectrum_dim=spectrum_dim,
-        latent_dim=latent_dim
-    )
-    with open(autoencoder_path, 'rb') as f:
-        autoencoder_state = serialization.from_bytes(autoencoder, f.read())
-    
-    # Load regressor
-    regressor = RegressorMLP(
-        hidden_dims=[256, 512, 1024], # 512, 1024, 512, 256],
-        latent_dim=latent_dim,
-        dropout_rate=0.1
-    )
-    with open(regressor_path, 'rb') as f:
-        regressor_state = serialization.from_bytes(regressor, f.read())
-    
-    return autoencoder, autoencoder_state, regressor, regressor_state
+from train_autoencoder import load_model as load_autoencoder
+from train_regressor import load_regressor, load_data_regressor
 
 
-def generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state, age, metallicity, ages, metallicities):
-    """Generate a spectrum for given age and metallicity.
-    
-    Args:
-        regressor: Regressor model
-        regressor_state: Regressor state dictionary
-        autoencoder: Autoencoder model
-        autoencoder_state: Autoencoder state dictionary
-        age: Age in Gyr
-        metallicity: Metallicity in Z/Z_sun
-        ages: Array of ages
-        metallicities: Array of metallicities
-        
-    Returns:
-        Generated spectrum
-    """
-    # Normalize inputs
-    norm_age = (age - ages.mean()) / ages.std()
-    norm_met = (metallicity - metallicities.mean()) / metallicities.std()
-    
-    # Create input array
-    conditions = jnp.array([[norm_age, norm_met]])
+def generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state, age, metallicity):
+    """Generate a spectrum for given age and metallicity."""
+    conditions = jnp.array([[age, metallicity]])
     
     # Generate latent vector using regressor
-    variables = {'params': regressor_state['params'], 'batch_stats': regressor_state['batch_stats']}
-    latent = regressor.apply(
-        variables,
-        conditions,
-        training=False
-    )
+    regressor_variables = {'params': regressor_state['params']}
+    latent = regressor.apply(regressor_variables, conditions, training=False)
     
     # Decode latent vector to spectrum using autoencoder
-    variables = {'params': autoencoder_state['params'], 'batch_stats': autoencoder_state['batch_stats']}
-    spectrum = autoencoder.apply(
-        variables,
-        latent,
-        method='decode',
-        training=False
-    )
+    autoencoder_variables = {'params': autoencoder_state.params, 'batch_stats': autoencoder_state.batch_stats}
+    spectrum = autoencoder.apply(autoencoder_variables, latent, method='decode', training=False)
     
-    return spectrum[0]  # Remove batch dimension
+    return spectrum[0]
 
 
 def compute_metrics(true_spectra, pred_spectra):
     """Compute various reconstruction metrics."""
-    # Mean Squared Error
     mse = np.mean((true_spectra - pred_spectra) ** 2, axis=1)
-    
-    # Mean Absolute Error
     mae = np.mean(np.abs(true_spectra - pred_spectra), axis=1)
-    
-    # Mean Absolute Percentage Error
-    # mape = np.mean(np.abs((true_spectra - pred_spectra) / true_spectra), axis=1) * 100
-    
-    # Peak Signal-to-Noise Ratio (PSNR)
     max_val = np.max(true_spectra)
     psnr = 20 * np.log10(max_val) - 10 * np.log10(mse)
-    
-    return {
-        'mse': mse,
-        'mae': mae,
-        # 'mape': mape,
-        'psnr': psnr
-    }
+    return {'mse': mse, 'mae': mae, 'psnr': psnr}
 
 
 def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, metallicity, save_path):
     """Plot comparison of true and predicted spectra."""
     plt.figure(figsize=(12, 6))
-    
-    # Plot full spectrum
     plt.subplot(2, 1, 1)
     plt.plot(wavelengths, true_spectrum, label='True', alpha=0.7)
     plt.plot(wavelengths, pred_spectrum, label='Predicted', alpha=0.7)
@@ -112,8 +46,6 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
     plt.ylabel('Flux')
     plt.legend()
     plt.title(f'Full Spectrum (Age: {age:.2f} Gyr, Z: {metallicity:.2f})')
-    
-    # Plot zoomed region (e.g., around 4000-5000 Å)
     plt.subplot(2, 1, 2)
     mask = (wavelengths >= 4000) & (wavelengths <= 5000)
     plt.plot(wavelengths[mask], true_spectrum[mask], label='True', alpha=0.7)
@@ -122,7 +54,6 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
     plt.ylabel('Flux')
     plt.legend()
     plt.title('Zoomed Region (4000-5000 Å)')
-    
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
@@ -130,114 +61,105 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
 
 def plot_metrics_distribution(metrics, save_dir):
     """Plot distributions of reconstruction metrics."""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    axes[0].hist(metrics['mse'], bins=50)
+    axes[0].set_title('Mean Squared Error Distribution')
+    axes[1].hist(metrics['mae'], bins=50)
+    axes[1].set_title('Mean Absolute Error Distribution')
+    axes[2].hist(metrics['psnr'], bins=50)
+    axes[2].set_title('Peak Signal-to-Noise Ratio Distribution')
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/regressor_metrics_dist.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path):
+    """
+    Computes and plots the median absolute error and percentile ranges
+    as a function of wavelength.
+    """
+    # Calculate the absolute error for each spectrum at each wavelength
+    abs_error = np.abs(true_spectra - pred_spectra)
     
-    # MSE distribution
-    axes[0, 0].hist(metrics['mse'], bins=50)
-    axes[0, 0].set_xlabel('MSE')
-    axes[0, 0].set_ylabel('Count')
-    axes[0, 0].set_title('Mean Squared Error Distribution')
+    # Compute the median and percentile statistics across the test set for each wavelength
+    median_error = np.median(abs_error, axis=0)
+    p16_error = np.percentile(abs_error, 16, axis=0)
+    p84_error = np.percentile(abs_error, 84, axis=0)
     
-    # MAE distribution
-    axes[0, 1].hist(metrics['mae'], bins=50)
-    axes[0, 1].set_xlabel('MAE')
-    axes[0, 1].set_ylabel('Count')
-    axes[0, 1].set_title('Mean Absolute Error Distribution')
+    plt.figure(figsize=(14, 6))
     
-    # MAPE distribution
-    # axes[1, 0].hist(metrics['mape'], bins=50)
-    # axes[1, 0].set_xlabel('MAPE (%)')
-    # axes[1, 0].set_ylabel('Count')
-    # axes[1, 0].set_title('Mean Absolute Percentage Error Distribution')
+    # Plot the median error
+    plt.plot(wavelengths, median_error, label='Median Absolute Error', color='blue')
     
-    # PSNR distribution
-    axes[1, 1].hist(metrics['psnr'], bins=50)
-    axes[1, 1].set_xlabel('PSNR (dB)')
-    axes[1, 1].set_ylabel('Count')
-    axes[1, 1].set_title('Peak Signal-to-Noise Ratio Distribution')
+    # Plot the 1-sigma equivalent percentile range as a shaded region
+    plt.fill_between(wavelengths, p16_error, p84_error, color='blue', alpha=0.3,
+                     label='16th-84th Percentile Range')
+    
+    plt.xlabel('Wavelength (Å)')
+    plt.ylabel('Absolute Error (Flux)')
+    plt.title('Error Distribution vs. Wavelength')
+    plt.legend()
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.yscale('log')
     
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/regressor_metrics.png', dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
 
 def main():
-    # Load dataset
-    grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    if len(sys.argv) != 5:
+        print("Usage: python evaluate_regressor.py <grid_dir> <grid_name> <autoencoder_path> <regressor_path>")
+        sys.exit(1)
+
+    grid_dir, grid_name, autoencoder_path, regressor_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
     
-    # Load models
-    autoencoder, autoencoder_state, regressor, regressor_state = load_models(
-        'models/best_autoencoder.msgpack',
-        'models/best_regressor.msgpack',
-        spectrum_dim=dataset.n_wavelength,
-        latent_dim=128
-    )
+    _, _, test_dataset = load_data_regressor(grid_dir, grid_name, n_samples=int(1e3))
     
-    # Evaluate on test set
-    test_size = min(100, len(dataset))  # Limit to 1000 samples for evaluation
-    test_indices = np.random.choice(len(dataset), test_size, replace=False)
+    print(f"Loading autoencoder from {autoencoder_path}...")
+    autoencoder, autoencoder_state = load_autoencoder(autoencoder_path)
     
-    # Collect predictions and metrics
-    true_spectra = []
-    pred_spectra = []
-    ages = []
-    metallicities = []
+    print(f"Loading regressor from {regressor_path}...")
+    regressor, regressor_state = load_regressor(regressor_path)
     
-    print("Evaluating model...")
-    for idx in tqdm(test_indices):
-        # Get true spectrum and parameters
-        true_spectrum = dataset.spectra[idx]
-        age = dataset.ages[idx]
-        metallicity = dataset.metallicities[idx]
+    output_dir = 'figures/regressor_evaluation'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    true_spectra, pred_spectra, ages, metallicities = [], [], [], []
+    
+    print(f"Evaluating model on {len(test_dataset)} test samples...")
+    for i in tqdm(range(len(test_dataset))):
+        true_spectrum = test_dataset.spectra[i]
+        age = test_dataset.conditions[i, 0]
+        metallicity = test_dataset.conditions[i, 1]
         
-        # Generate predicted spectrum
-        pred_spectrum = generate_spectrum(
-            regressor,
-            regressor_state,
-            autoencoder,
-            autoencoder_state,
-            age,
-            metallicity,
-            dataset.ages,
-            dataset.metallicities
-        )
+        pred_spectrum_jax = generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state, age, metallicity)
         
         true_spectra.append(true_spectrum)
-        pred_spectra.append(pred_spectrum)
+        pred_spectra.append(np.asarray(pred_spectrum_jax))
         ages.append(age)
         metallicities.append(metallicity)
     
-    # Convert to numpy arrays
     true_spectra = np.array(true_spectra)
     pred_spectra = np.array(pred_spectra)
-    ages = np.array(ages)
-    metallicities = np.array(metallicities)
     
-    # Compute metrics
     metrics = compute_metrics(true_spectra, pred_spectra)
-    
-    # Print summary statistics
     print("\nReconstruction Metrics Summary:")
     print(f"MSE: {np.mean(metrics['mse']):.4f} ± {np.std(metrics['mse']):.4f}")
     print(f"MAE: {np.mean(metrics['mae']):.4f} ± {np.std(metrics['mae']):.4f}")
-    # print(f"MAPE: {np.mean(metrics['mape']):.2f}% ± {np.std(metrics['mape']):.2f}%")
     print(f"PSNR: {np.mean(metrics['psnr']):.2f} ± {np.std(metrics['psnr']):.2f} dB")
     
-    # Plot metrics distributions
-    plot_metrics_distribution(metrics, 'figures/regressor_evaluation')
+    plot_metrics_distribution(metrics, output_dir)
     
-    # Plot example reconstructions
-    for i in range(5):  # Plot 5 examples
+    print("Plotting error vs wavelength distribution...")
+    plot_error_vs_wavelength(true_spectra, pred_spectra, test_dataset.wavelength, f'{output_dir}/error_vs_wavelength.png')
+    
+    print("Saving example spectrum comparison plots...")
+    for i in range(min(5, len(test_dataset))):
         plot_spectrum_comparison(
-            true_spectra[i],
-            pred_spectra[i],
-            dataset.wavelength,
-            ages[i],
-            metallicities[i],
-            f'figures/regressor_evaluation/spectrum_comparison_{i+1}.png'
+            true_spectra[i], pred_spectra[i], test_dataset.wavelength, ages[i], metallicities[i],
+            f'{output_dir}/spectrum_comparison_{i+1}.png'
         )
-
 
 if __name__ == "__main__":
     main() 

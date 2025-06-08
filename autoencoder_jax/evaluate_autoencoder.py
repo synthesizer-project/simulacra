@@ -3,28 +3,11 @@ sys.path.append('..')
 
 import numpy as np
 import matplotlib.pyplot as plt
-import jax
-import jax.numpy as jnp
-from flax import serialization
 from tqdm import tqdm
+import os
 
-from autoencoder import SpectrumAutoencoder
 from grids import SpectralDatasetSynthesizer
-
-
-def load_model(model_path, spectrum_dim, latent_dim):
-    """Load a trained autoencoder model."""
-    # Create model instance
-    model = SpectrumAutoencoder(
-        spectrum_dim=spectrum_dim,
-        latent_dim=latent_dim
-    )
-    
-    # Load state
-    with open(model_path, 'rb') as f:
-        state_dict = serialization.from_bytes(model, f.read())
-    
-    return model, state_dict
+from train_autoencoder import load_model
 
 
 def compute_reconstruction_metrics(true_spectra, pred_spectra):
@@ -80,31 +63,25 @@ def plot_reconstruction(true_spectrum, pred_spectrum, wavelengths, save_path):
 
 def plot_metrics_distribution(metrics, save_dir):
     """Plot distributions of reconstruction metrics."""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 8))
     
     # MSE distribution
-    axes[0, 0].hist(metrics['mse'], bins=50)
-    axes[0, 0].set_xlabel('MSE')
-    axes[0, 0].set_ylabel('Count')
-    axes[0, 0].set_title('Mean Squared Error Distribution')
+    axes[0].hist(metrics['mse'], bins=50)
+    axes[0].set_xlabel('MSE')
+    axes[0].set_ylabel('Count')
+    axes[0].set_title('Mean Squared Error Distribution')
     
     # MAE distribution
-    axes[0, 1].hist(metrics['mae'], bins=50)
-    axes[0, 1].set_xlabel('MAE')
-    axes[0, 1].set_ylabel('Count')
-    axes[0, 1].set_title('Mean Absolute Error Distribution')
-    
-    # MAPE distribution
-    # axes[1, 0].hist(metrics['mape'], bins=50)
-    # axes[1, 0].set_xlabel('MAPE (%)')
-    # axes[1, 0].set_ylabel('Count')
-    # axes[1, 0].set_title('Mean Absolute Percentage Error Distribution')
+    axes[1].hist(metrics['mae'], bins=50)
+    axes[1].set_xlabel('MAE')
+    axes[1].set_ylabel('Count')
+    axes[1].set_title('Mean Absolute Error Distribution')
     
     # PSNR distribution
-    axes[1, 1].hist(metrics['psnr'], bins=50)
-    axes[1, 1].set_xlabel('PSNR (dB)')
-    axes[1, 1].set_ylabel('Count')
-    axes[1, 1].set_title('Peak Signal-to-Noise Ratio Distribution')
+    axes[2].hist(metrics['psnr'], bins=50)
+    axes[2].set_xlabel('PSNR (dB)')
+    axes[2].set_ylabel('Count')
+    axes[2].set_title('Peak Signal-to-Noise Ratio Distribution')
     
     plt.tight_layout()
     plt.savefig(f'{save_dir}/reconstruction_metrics.png', dpi=300, bbox_inches='tight')
@@ -141,58 +118,92 @@ def plot_latent_space(latent_vectors, ages, metallicities, save_path):
     plt.close()
 
 
-def main():
-    # Load dataset
-    grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5')
+def plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path, epsilon=1e-9):
+    """
+    Computes and plots the median fractional error and percentile ranges
+    as a function of wavelength.
+    """
+    # Calculate the fractional error, avoiding division by zero
+    fractional_error = (pred_spectra - true_spectra) / (true_spectra + epsilon)
     
-    # Load model
-    model, state_dict = load_model(
-        'models/best_autoencoder.msgpack',
-        spectrum_dim=dataset.n_wavelength,
-        latent_dim=128
+    # Compute the median and percentile statistics across the test set for each wavelength
+    median_error = np.median(fractional_error, axis=0)
+    p16_error = np.percentile(fractional_error, 16, axis=0)
+    p84_error = np.percentile(fractional_error, 84, axis=0)
+    
+    plt.figure(figsize=(14, 6))
+    
+    # Plot the median fractional error
+    plt.plot(wavelengths, median_error, label='Median Fractional Error', color='crimson')
+    
+    # Plot the 1-sigma equivalent percentile range as a shaded region
+    plt.fill_between(wavelengths, p16_error, p84_error, color='crimson', alpha=0.3,
+                     label='16th-84th Percentile Range')
+    
+    plt.xlabel('Wavelength (Å)')
+    plt.ylabel('Fractional Error (pred - true) / true')
+    plt.title('Fractional Error Distribution vs. Wavelength')
+    plt.legend()
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.ylim(-0.5, 0.5)  # Set a reasonable y-axis limit
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def main():
+    if len(sys.argv) != 4:
+        print("Usage: python evaluate_autoencoder.py <grid_dir> <grid_name> <model_path>")
+        sys.exit(1)
+        
+    grid_dir, grid_name, model_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    
+    # Load dataset for evaluation
+    N_samples = int(1e4)
+    dataset = SpectralDatasetSynthesizer(
+        grid_dir=grid_dir,
+        grid_name=grid_name,
+        num_samples=N_samples,
     )
     
+    # Load model and state
+    print(f"Loading model from {model_path}...")
+    model, state = load_model(model_path)
+    
     # Create output directory
-    import os
     os.makedirs('figures/autoencoder_evaluation', exist_ok=True)
     
-    # Evaluate on test set
-    test_size = min(100, len(dataset))  # Limit to 1000 samples for evaluation
+    # Evaluate on a subset of the dataset
+    test_size = min(100, len(dataset))
     test_indices = np.random.choice(len(dataset), test_size, replace=False)
     
-    # Collect predictions and metrics
-    true_spectra = []
-    pred_spectra = []
-    latent_vectors = []
-    ages = []
-    metallicities = []
+    true_spectra, pred_spectra, latent_vectors = [], [], []
+    ages, metallicities = [], []
     
     print("Evaluating model...")
     for idx in tqdm(test_indices):
-        # Get true spectrum
         true_spectrum = dataset.spectra[idx]
-        true_spectra.append(true_spectrum)
+        variables = {'params': state.params, 'batch_stats': state.batch_stats}
         
-        # Get model prediction
-        variables = {'params': state_dict['params'], 'batch_stats': state_dict['batch_stats']}
-        pred_spectrum = model.apply(
+        # Reconstruct spectrum using the default __call__ method
+        reconstructed_spectrum = model.apply(
             variables,
-            true_spectrum[None, :],  # Add batch dimension
+            true_spectrum[None, :],
             training=False
-        )[0]  # Remove batch dimension
-        pred_spectra.append(pred_spectrum)
+        )[0]
         
-        # Get latent vector
+        # Encode to get latent vector using the 'encode' method
         latent = model.apply(
             variables,
             true_spectrum[None, :],
             method='encode',
             training=False
         )[0]
-        latent_vectors.append(latent)
         
-        # Store parameters
+        true_spectra.append(true_spectrum)
+        pred_spectra.append(reconstructed_spectrum)
+        latent_vectors.append(latent)
         ages.append(dataset.ages[idx])
         metallicities.append(dataset.metallicities[idx])
     
@@ -203,29 +214,26 @@ def main():
     ages = np.array(ages)
     metallicities = np.array(metallicities)
     
-    # Compute metrics
+    # Compute and print metrics
     metrics = compute_reconstruction_metrics(true_spectra, pred_spectra)
-    
-    # Print summary statistics
     print("\nReconstruction Metrics Summary:")
     print(f"MSE: {np.mean(metrics['mse']):.4f} ± {np.std(metrics['mse']):.4f}")
     print(f"MAE: {np.mean(metrics['mae']):.4f} ± {np.std(metrics['mae']):.4f}")
-    # print(f"MAPE: {np.mean(metrics['mape']):.2f}% ± {np.std(metrics['mape']):.2f}%")
     print(f"PSNR: {np.mean(metrics['psnr']):.2f} ± {np.std(metrics['psnr']):.2f} dB")
     
-    # Plot metrics distributions
+    # Plot metrics and latent space
     plot_metrics_distribution(metrics, 'figures/autoencoder_evaluation')
+    plot_latent_space(latent_vectors, ages, metallicities, 'figures/autoencoder_evaluation/latent_space.png')
     
-    # Plot latent space
-    plot_latent_space(
-        latent_vectors,
-        ages,
-        metallicities,
-        'figures/autoencoder_evaluation/latent_space.png'
+    print("Plotting fractional error vs wavelength distribution...")
+    plot_fractional_error_vs_wavelength(
+        true_spectra, pred_spectra, dataset.wavelength, 
+        'figures/autoencoder_evaluation/fractional_error_vs_wavelength.png'
     )
     
     # Plot example reconstructions
-    for i in range(5):  # Plot 5 examples
+    print("Saving example reconstruction plots...")
+    for i in range(min(5, test_size)):
         plot_reconstruction(
             true_spectra[i],
             pred_spectra[i],
