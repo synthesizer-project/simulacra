@@ -16,8 +16,8 @@ from grids import SpectralDatasetSynthesizer
 from activations import ParametricGatedActivation
 
 
-def save_model(model, state, model_path):
-    """Saves the model state and hyperparameters to a single file."""
+def save_model(model, state, dataset, model_path):
+    """Saves the model state, hyperparameters, and normalization constants to a single file."""
     hyperparams = {
         'spectrum_dim': model.spectrum_dim,
         'latent_dim': model.latent_dim,
@@ -26,6 +26,10 @@ def save_model(model, state, model_path):
         'dropout_rate': model.dropout_rate,
         'activation_name': getattr(model, 'activation_name', 'relu'),
     }
+    norm_params = {
+        'spec_mean': dataset.spec_mean,
+        'spec_std': dataset.spec_std,
+    }
     state_dict = {
         'params': state.params,
         'batch_stats': state.batch_stats,
@@ -33,7 +37,8 @@ def save_model(model, state, model_path):
     }
     bundled_data = {
         'hyperparams': hyperparams,
-        'state_dict': state_dict
+        'state_dict': state_dict,
+        'norm_params': norm_params,
     }
     with open(model_path, 'wb') as f:
         f.write(serialization.to_bytes(bundled_data))
@@ -46,6 +51,7 @@ def load_model(model_path):
     
     hyperparams = bundled_data['hyperparams']
     state_dict = bundled_data['state_dict']
+    norm_params = bundled_data.get('norm_params', None)  # For backward compatibility
     
     # Robustly handle features that might be stored as lists or dicts,
     # and ensure they are integers. This prevents data type errors.
@@ -71,7 +77,7 @@ def load_model(model_path):
         opt_state={}
     )
     
-    return model, state
+    return model, state, norm_params
 
 
 # === Model Architecture ===
@@ -336,7 +342,7 @@ def train_and_evaluate(
             break
             
     if save_path and best_state:
-        save_model(model, best_state, save_path)
+        save_model(model, best_state, train_ds, save_path)
         if verbose:
             print(f"\nBest model from epoch {best_epoch + 1} saved to {save_path}")
     

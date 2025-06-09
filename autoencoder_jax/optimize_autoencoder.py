@@ -90,6 +90,7 @@ if __name__ == "__main__":
         encoder_features=best_encoder_features,
         decoder_features=best_encoder_features[::-1],
         dropout_rate=best_params['dropout_rate'],
+        activation_name=best_params['activation_function']
     )
 
     # Train the final model with the best hyperparameters
