@@ -8,8 +8,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Tuple
 
-from autoencoder import SpectrumAutoencoder
-from regressor import RegressorMLP
+from train_autoencoder import SpectrumAutoencoder
+from train_regressor import RegressorMLP
 from grids import SpectralDatasetSynthesizer
 
 
@@ -97,7 +97,7 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
     # Create colormaps for positive and negative values
     pos_cmap = plt.cm.Reds
     neg_cmap = plt.cm.Blues
-    
+
     # Plot spectrum
     plt.subplot(3, 1, 1)
     plt.plot(wavelengths, spectrum, label='Spectrum')
@@ -121,7 +121,7 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
         pos_norm = age_grad[pos_mask] / np.max(age_grad[pos_mask])
         age_colors[pos_mask] = pos_cmap(pos_norm)
     if np.any(neg_mask):
-        neg_norm = -age_grad[neg_mask] / np.min(age_grad[neg_mask])
+        neg_norm = age_grad[neg_mask] / np.min(age_grad[neg_mask])
         age_colors[neg_mask] = neg_cmap(neg_norm)
     
     # Plot with colored segments
@@ -135,17 +135,17 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
         )
     
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Gradient')
+    plt.ylabel('dS / d(Age)')
     plt.title('Gradient with respect to Age')
     
-    # Add legend for age gradient
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], color='black', linestyle='--', label='Zero Gradient'),
-        Line2D([0], [0], color=pos_cmap(0.8), label='Positive Gradient'),
-        Line2D([0], [0], color=neg_cmap(0.8), label='Negative Gradient')
-    ]
-    plt.legend(handles=legend_elements)
+    # # Add legend for age gradient
+    # from matplotlib.lines import Line2D
+    # legend_elements = [
+    #     Line2D([0], [0], color='black', linestyle='--', label='Zero Gradient'),
+    #     Line2D([0], [0], color=pos_cmap(0.8), label='Positive Gradient'),
+    #     Line2D([0], [0], color=neg_cmap(0.8), label='Negative Gradient')
+    # ]
+    # plt.legend(handles=legend_elements)
     
     # Plot gradient with respect to metallicity
     plt.subplot(3, 1, 3)
@@ -162,7 +162,7 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
         pos_norm = met_grad[pos_mask] / np.max(met_grad[pos_mask])
         met_colors[pos_mask] = pos_cmap(pos_norm)
     if np.any(neg_mask):
-        neg_norm = -met_grad[neg_mask] / np.min(met_grad[neg_mask])
+        neg_norm = met_grad[neg_mask] / np.min(met_grad[neg_mask])
         met_colors[neg_mask] = neg_cmap(neg_norm)
     
     # Plot with colored segments
@@ -176,9 +176,9 @@ def plot_gradients(spectrum, gradients, wavelengths, age, metallicity, save_path
         )
     
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Gradient')
+    plt.ylabel('dS / d(Z)')
     plt.title('Gradient with respect to Metallicity')
-    plt.legend(handles=legend_elements)
+    # plt.legend(handles=legend_elements)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -244,8 +244,16 @@ def test_parameter_sensitivity(
 
 def main():
     # Load dataset
-    grid_dir = '../../synthesizer_grids/grids/'
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name='bc03-2016-Miles_chabrier-0.1,100.hdf5')
+    N_samples = int(1e5)
+    # spec_type='stellar'  # 'incident'
+    grid_dir = sys.argv[1] # '/home/chris/code/synthesizer_grids/grids/'
+    grid_name = sys.argv[2] # 'bc03-2016-Miles_chabrier-0.1,100.hdf5''bc03_chabrier03-0.1,100.hdf5'
+    # grid_dir = '../../synthesizer_data/grids/'
+    dataset = SpectralDatasetSynthesizer(
+        grid_dir=grid_dir,
+        grid_name=grid_name,
+        num_samples=N_samples
+    )
     
     # Load models
     autoencoder, autoencoder_state, regressor, regressor_state = load_models(
