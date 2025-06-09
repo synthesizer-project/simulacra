@@ -12,6 +12,15 @@ from train_autoencoder import load_model as load_autoencoder
 from train_regressor import load_regressor, load_data_regressor
 
 
+def unnormalize_spectrum(norm_spectrum, norm_params):
+    """Un-normalizes a spectrum to log-space using the provided parameters."""
+    if norm_params is None:
+        return norm_spectrum
+    mean = norm_params['spec_mean']
+    std = norm_params['spec_std']
+    return (norm_spectrum * std) + mean
+
+
 def generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state, age, metallicity):
     """Generate a spectrum for given age and metallicity."""
     conditions = jnp.array([[age, metallicity]])
@@ -28,12 +37,15 @@ def generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state
 
 
 def compute_metrics(true_spectra, pred_spectra):
-    """Compute various reconstruction metrics."""
+    """Compute various reconstruction metrics on log-spectra."""
     mse = np.mean((true_spectra - pred_spectra) ** 2, axis=1)
     mae = np.mean(np.abs(true_spectra - pred_spectra), axis=1)
-    max_val = np.max(true_spectra)
-    psnr = 20 * np.log10(max_val) - 10 * np.log10(mse)
-    return {'mse': mse, 'mae': mae, 'psnr': psnr}
+    
+    signal_var = np.var(true_spectra, axis=1)
+    noise_var = np.var(true_spectra - pred_spectra, axis=1)
+    snr = 10 * np.log10(signal_var / (noise_var + 1e-9))
+    
+    return {'mse': mse, 'mae': mae, 'snr': snr}
 
 
 def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, metallicity, save_path):
@@ -43,7 +55,7 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
     plt.plot(wavelengths, true_spectrum, label='True', alpha=0.7)
     plt.plot(wavelengths, pred_spectrum, label='Predicted', alpha=0.7)
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Flux')
+    plt.ylabel('Log Flux')
     plt.legend()
     plt.title(f'Full Spectrum (Age: {age:.2f} Gyr, Z: {metallicity:.2f})')
     plt.subplot(2, 1, 2)
@@ -51,7 +63,7 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
     plt.plot(wavelengths[mask], true_spectrum[mask], label='True', alpha=0.7)
     plt.plot(wavelengths[mask], pred_spectrum[mask], label='Predicted', alpha=0.7)
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Flux')
+    plt.ylabel('Log Flux')
     plt.legend()
     plt.title('Zoomed Region (4000-5000 Å)')
     plt.tight_layout()
@@ -66,8 +78,9 @@ def plot_metrics_distribution(metrics, save_dir):
     axes[0].set_title('Mean Squared Error Distribution')
     axes[1].hist(metrics['mae'], bins=50)
     axes[1].set_title('Mean Absolute Error Distribution')
-    axes[2].hist(metrics['psnr'], bins=50)
-    axes[2].set_title('Peak Signal-to-Noise Ratio Distribution')
+    axes[2].hist(metrics['snr'], bins=50)
+    axes[2].set_title('Signal-to-Noise Ratio Distribution')
+    axes[2].set_xlabel('SNR (dB)')
     plt.tight_layout()
     plt.savefig(f'{save_dir}/regressor_metrics_dist.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -96,7 +109,7 @@ def plot_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path)
                      label='16th-84th Percentile Range')
     
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Absolute Error (Flux)')
+    plt.ylabel('Absolute Error (Log Flux)')
     plt.title('Error Distribution vs. Wavelength')
     plt.legend()
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -117,7 +130,7 @@ def main():
     _, _, test_dataset = load_data_regressor(grid_dir, grid_name, n_samples=int(1e3))
     
     print(f"Loading autoencoder from {autoencoder_path}...")
-    autoencoder, autoencoder_state = load_autoencoder(autoencoder_path)
+    autoencoder, autoencoder_state, norm_params = load_autoencoder(autoencoder_path)
     
     print(f"Loading regressor from {regressor_path}...")
     regressor, regressor_state = load_regressor(regressor_path)
@@ -129,16 +142,25 @@ def main():
     
     print(f"Evaluating model on {len(test_dataset)} test samples...")
     for i in tqdm(range(len(test_dataset))):
-        true_spectrum = test_dataset.spectra[i]
-        age = test_dataset.conditions[i, 0]
-        metallicity = test_dataset.conditions[i, 1]
+        norm_true_spectrum = test_dataset.spectra[i]
+        norm_age = test_dataset.conditions[i, 0]
+        norm_metallicity = test_dataset.conditions[i, 1]
         
-        pred_spectrum_jax = generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state, age, metallicity)
+        # Generate the predicted spectrum (which is normalized)
+        norm_pred_spectrum_jax = generate_spectrum(
+            regressor, regressor_state, autoencoder, autoencoder_state, norm_age, norm_metallicity
+        )
+        
+        # Un-normalize for metrics and plotting
+        true_spectrum = unnormalize_spectrum(norm_true_spectrum, norm_params)
+        pred_spectrum = unnormalize_spectrum(np.asarray(norm_pred_spectrum_jax), norm_params)
         
         true_spectra.append(true_spectrum)
-        pred_spectra.append(np.asarray(pred_spectrum_jax))
-        ages.append(age)
-        metallicities.append(metallicity)
+        pred_spectra.append(pred_spectrum)
+
+        # Un-normalize physical parameters for plotting
+        ages.append(test_dataset.unnormalize_age(norm_age))
+        metallicities.append(test_dataset.unnormalize_metallicity(norm_metallicity))
     
     true_spectra = np.array(true_spectra)
     pred_spectra = np.array(pred_spectra)
@@ -147,7 +169,7 @@ def main():
     print("\nReconstruction Metrics Summary:")
     print(f"MSE: {np.mean(metrics['mse']):.4f} ± {np.std(metrics['mse']):.4f}")
     print(f"MAE: {np.mean(metrics['mae']):.4f} ± {np.std(metrics['mae']):.4f}")
-    print(f"PSNR: {np.mean(metrics['psnr']):.2f} ± {np.std(metrics['psnr']):.2f} dB")
+    print(f"SNR: {np.mean(metrics['snr']):.2f} ± {np.std(metrics['snr']):.2f} dB")
     
     plot_metrics_distribution(metrics, output_dir)
     
