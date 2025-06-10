@@ -1,2 +1,2 @@
-# grid-emulation
-Scripts for training and using emulated grids
+# Simulacra
+Scripts for training and using emulated grids in Synthesizer
