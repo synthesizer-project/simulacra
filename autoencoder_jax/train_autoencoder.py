@@ -11,6 +11,7 @@ CLI:
   python train_autoencoder.py <grid_dir> <grid_name>
                               [--samples N] [--epochs E]
                               [--batch-size B] [--save PATH]
+                              [--global-norm] [--no-norm]
 
 Arguments:
 - grid_dir: Directory containing the spectral grid HDF5 files.
@@ -20,6 +21,10 @@ Arguments:
 - --batch-size: Mini-batch size (default: 64).
 - --save: Output path for the bundled model (default:
           models/autoencoder_simple_dense.msgpack).
+- --global-norm: Use dataset-wide global mean/std for normalization during
+          training (bypasses per-spectrum normalization).
+- --no-norm: Disable spectrum normalization completely; train directly on
+          log10 spectra as provided by the grid.
 
 Outputs:
 - Bundled model at the provided --save path.
@@ -485,8 +490,13 @@ def train_and_evaluate(
     
     return state, train_losses, test_losses, best_test_loss
 
-def load_data(grid_dir, grid_name, n_samples):
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=n_samples)
+def load_data(grid_dir, grid_name, n_samples, norm_mode: str = 'per-spectra'):
+    dataset = SpectralDatasetSynthesizer(
+        grid_dir=grid_dir,
+        grid_name=grid_name,
+        num_samples=n_samples,
+        norm=norm_mode,
+    )
     rng = jax.random.PRNGKey(0)
     perm = jax.random.permutation(rng, len(dataset))
     split = int(0.8 * len(dataset))
@@ -549,7 +559,7 @@ def plot_training_validation_loss(
 def main():
     print(f"JAX devices: {jax.devices()}")
     
-    # Basic CLI: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]
+    # Basic CLI: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH] [--global-norm] [--no-norm]
     if len(sys.argv) < 3:
         print("Usage: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]")
         sys.exit(1)
@@ -569,12 +579,23 @@ def main():
             if i + 1 < len(args):
                 return cast(args[i+1])
         return None
+    def has_flag(flag):
+        return flag in args
     N_samples = get_arg('--samples', int) or N_samples
     num_epochs = get_arg('--epochs', int) or num_epochs
     batch_size = get_arg('--batch-size', int) or batch_size
     save_path = get_arg('--save', str) or save_path
+    use_global_norm = has_flag('--global-norm')
+    use_no_norm = has_flag('--no-norm')
 
-    train_dataset, test_dataset, rng = load_data(grid_dir, grid_name, N_samples)
+    if use_no_norm:
+        norm_mode = None
+        norm_label = 'none'
+    else:
+        norm_mode = 'global' if use_global_norm else 'per-spectra'
+        norm_label = norm_mode
+    print(f"Normalization mode: {norm_label}")
+    train_dataset, test_dataset, rng = load_data(grid_dir, grid_name, N_samples, norm_mode=norm_mode)
     
     print("--- Using Standard Dense Architecture ---")
     model = SpectrumAutoencoder(

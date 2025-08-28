@@ -1,16 +1,18 @@
 """
-Train a normalization MLP to predict per-spectrum mean and std.
+Train a normalization MLP to predict spectrum normalization parameters.
 
 Description:
-- Given normalized physical conditions (age, metallicity), trains a small MLP
-  to predict the spectrum-level normalization parameters (mean, std) used to
-  de/normalize log10 spectra for the autoencoder pipeline.
+- Given normalized physical conditions (age, metallicity), trains an MLP
+  to predict normalization parameters used to denormalize spectra in the
+  autoencoder pipeline. Supports two modes:
+  * Per-spectrum: Predicts single mean/std values per spectrum
+  * Per-wavelength: Predicts mean/std values for each wavelength independently
 - Saves a bundled msgpack containing model hyperparameters and parameters.
 
 CLI:
   python train_norm_mlp.py <grid_dir> <grid_name>
-                           [--samples N] [--epochs E]
-                           [--batch-size B] [--save PATH]
+                           [--samples N] [--epochs E] [--batch-size B] 
+                           [--save PATH] [--per-wavelength]
 
 Arguments:
 - grid_dir: Directory containing the spectral grid HDF5 files.
@@ -19,13 +21,15 @@ Arguments:
 - --epochs: Number of training epochs (default: 100).
 - --batch-size: Mini-batch size (default: 64).
 - --save: Output path for the bundled model (default: models/norm_mlp.msgpack).
+- --per-wavelength: Use per-wavelength normalization (default: per-spectrum).
 
 Outputs:
 - Bundled normalization MLP at the provided --save path.
 
 Notes:
-- This model is consumed by evaluate_autoencoder.py to recover final
-  log-flux spectra from the AE’s normalized outputs.
+- This model is consumed by evaluate_autoencoder.py and evaluate_regressor.py
+  to recover final log-flux spectra from normalized outputs.
+- Per-wavelength mode may provide better reconstruction but requires more parameters.
 """
 
 import sys
@@ -47,7 +51,9 @@ from grids import SpectralDatasetSynthesizer
 def save_model(model, params, model_path):
     """Saves the MLP model state and hyperparameters to a single file."""
     hyperparams = {
-        'features': model.features
+        'features': model.features,
+        'per_spectrum': model.per_spectrum,
+        'n_wavelengths': model.n_wavelengths
     }
     bundled_data = {
         'hyperparams': hyperparams,
@@ -74,13 +80,24 @@ def load_norm_mlp_model(model_path: str) -> (nn.Module, Dict):
     elif isinstance(features, (list, tuple)):
         hyperparams['features'] = tuple(int(f) for f in features)
     
+    # Handle new hyperparameters with backward compatibility
+    hyperparams['per_spectrum'] = hyperparams.get('per_spectrum', True)  # Default to per-spectrum mode
+    hyperparams['n_wavelengths'] = hyperparams.get('n_wavelengths', 6230)  # Default wavelength count
+    
     model = NormalizationMLP(**hyperparams)
     return model, params
 
 # === Model Architecture ===
 class NormalizationMLP(nn.Module):
-    """A simple MLP to predict spectrum mean and std from physical conditions."""
+    """MLP to predict spectrum normalization parameters from physical conditions.
+    
+    Supports two modes:
+    - per_spectrum=True: Outputs 2 values (mean, std) per spectrum
+    - per_spectrum=False: Outputs 2*n_wavelengths values (mean, std per wavelength)
+    """
     features: Sequence[int] = (128, 128)
+    per_spectrum: bool = True  # If False, use per-wavelength normalization
+    n_wavelengths: int = 6230  # Only used when per_spectrum=False
 
     @nn.compact
     def __call__(self, x, training: bool = True):
@@ -88,13 +105,18 @@ class NormalizationMLP(nn.Module):
             x = nn.Dense(feat)(x)
             x = nn.relu(x)
         
-        # Output two values: one for the mean, one for the std
-        x = nn.Dense(2)(x)
-        
-        pred_mean = x[..., 0:1]
-        
-        # Ensure std is positive using a softplus activation
-        pred_std = nn.softplus(x[..., 1:2])
+        if self.per_spectrum:
+            # Per-spectrum mode: Output 2 values (mean, std)
+            x = nn.Dense(2)(x)
+            pred_mean = x[..., 0:1]
+            pred_std = nn.softplus(x[..., 1:2])
+        else:
+            # Per-wavelength mode: Output 2*n_wavelengths values
+            x = nn.Dense(self.n_wavelengths * 2)(x)
+            x = x.reshape(-1, self.n_wavelengths, 2)
+            
+            pred_mean = x[..., 0]  # Shape: (batch_size, n_wavelengths)
+            pred_std = nn.softplus(x[..., 1]) + 1e-6  # Ensure positive, shape: (batch_size, n_wavelengths)
         
         return pred_mean, pred_std
 
@@ -260,9 +282,9 @@ def train_and_evaluate(
 def main():
     print(f"JAX devices: {jax.devices()}")
     
-    # Basic CLI: python train_norm_mlp.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]
+    # Basic CLI: python train_norm_mlp.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH] [--per-wavelength]
     if len(sys.argv) < 3:
-        print("Usage: python train_norm_mlp.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]")
+        print("Usage: python train_norm_mlp.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH] [--per-wavelength]")
         sys.exit(1)
         
     grid_dir, grid_name = sys.argv[1], sys.argv[2]
@@ -271,6 +293,7 @@ def main():
     num_epochs = 100
     batch_size = 64
     save_path = 'models/norm_mlp.msgpack'
+    per_wavelength = False  # Default to per-spectrum normalization
 
     # Parse optional args
     args = sys.argv[3:]
@@ -280,10 +303,15 @@ def main():
             if i + 1 < len(args):
                 return cast(args[i+1])
         return None
+    
+    def has_flag(flag):
+        return flag in args
+        
     N_samples = get_arg('--samples', int) or N_samples
     num_epochs = get_arg('--epochs', int) or num_epochs
     batch_size = get_arg('--batch-size', int) or batch_size
     save_path = get_arg('--save', str) or save_path
+    per_wavelength = has_flag('--per-wavelength')
 
     # --- Load Data ---
     dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=N_samples)
@@ -293,19 +321,48 @@ def main():
     train_dataset = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[:split])
     test_dataset = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[split:])
     
+    # Prepare targets based on normalization mode
+    if per_wavelength:
+        print(f"Using per-wavelength normalization mode with {len(dataset.wavelength)} wavelengths")
+        # For per-wavelength mode, targets have shape (batch_size, n_wavelengths)
+        train_means = jnp.array(train_dataset.true_spec_mean)  # Shape: (N, n_wavelengths) or (N, 1) -> broadcast
+        train_stds = jnp.array(train_dataset.true_spec_std)    # Shape: (N, n_wavelengths) or (N, 1) -> broadcast
+        test_means = jnp.array(test_dataset.true_spec_mean)    # Shape: (M, n_wavelengths) or (M, 1) -> broadcast  
+        test_stds = jnp.array(test_dataset.true_spec_std)      # Shape: (M, n_wavelengths) or (M, 1) -> broadcast
+        
+        # Expand per-spectrum targets to per-wavelength if necessary
+        if train_means.shape[1] == 1:
+            train_means = jnp.broadcast_to(train_means, (len(train_dataset), len(dataset.wavelength)))
+            test_means = jnp.broadcast_to(test_means, (len(test_dataset), len(dataset.wavelength)))
+        if train_stds.shape[1] == 1:
+            train_stds = jnp.broadcast_to(train_stds, (len(train_dataset), len(dataset.wavelength)))
+            test_stds = jnp.broadcast_to(test_stds, (len(test_dataset), len(dataset.wavelength)))
+    else:
+        print("Using per-spectrum normalization mode")  
+        train_means = jnp.array(train_dataset.true_spec_mean)
+        train_stds = jnp.array(train_dataset.true_spec_std)
+        test_means = jnp.array(test_dataset.true_spec_mean)
+        test_stds = jnp.array(test_dataset.true_spec_std)
+    
     # --- Prefetch data to device (GPU/TPU) ---
     print("Prefetching data to the accelerator...")
     train_data = jax.device_put((
         jnp.array(train_dataset.conditions),
-        jnp.array(train_dataset.true_spec_mean),
-        jnp.array(train_dataset.true_spec_std)
+        train_means,
+        train_stds
     ))
     test_data = jax.device_put((
         jnp.array(test_dataset.conditions),
-        jnp.array(test_dataset.true_spec_mean),
-        jnp.array(test_dataset.true_spec_std)
+        test_means,
+        test_stds
     ))
     print("...done.")
+
+    # Create model with appropriate configuration
+    model = NormalizationMLP(
+        per_spectrum=not per_wavelength,  # Inverse because per_spectrum=True means per-spectrum normalization
+        n_wavelengths=len(dataset.wavelength)
+    )
 
     # --- Train ---
     train_and_evaluate(
@@ -315,6 +372,7 @@ def main():
         batch_size=batch_size,
         learning_rate=1e-3,
         rng=rng,
+        model=model,
         patience=10,
         lr_patience=4,
         lr_factor=0.5,

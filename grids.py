@@ -155,9 +155,18 @@ class SpectralDatasetSynthesizer:
             self.ages = self.ages[split]
             self.metallicities = self.metallicities[split]
             self.conditions = self.conditions[split]
-            # Also split the true mean/std
-            self.true_spec_mean = self.true_spec_mean[split]
-            self.true_spec_std = self.true_spec_std[split]
+            # Also split the true mean/std when they are per-sample arrays.
+            # In global mode, these may be scalars; keep them as-is.
+            if self.true_spec_mean is not None:
+                mean_arr = np.asarray(self.true_spec_mean)
+                std_arr = np.asarray(self.true_spec_std)
+                if mean_arr.ndim == 0:
+                    # Global scalar normalization: leave unchanged
+                    self.true_spec_mean = float(mean_arr)
+                    self.true_spec_std = float(std_arr)
+                else:
+                    self.true_spec_mean = self.true_spec_mean[split]
+                    self.true_spec_std = self.true_spec_std[split]
 
     def unnormalize_age(self, norm_age):
         """Un-normalizes a single age value."""

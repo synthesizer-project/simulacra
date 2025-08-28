@@ -1,22 +1,28 @@
 """
-Evaluate a trained autoencoder + normalization MLP and generate figures.
+Evaluate a trained autoencoder and generate figures.
 
 Description:
-- Loads a bundled autoencoder and a normalization MLP, samples a dataset from
-  the specified grid, reconstructs final log10 spectra, and computes metrics.
+- Default mode: loads a bundled autoencoder and a normalization MLP, samples a
+  dataset from the specified grid, reconstructs final log10 spectra, and
+  computes metrics.
+- Global normalization mode (--global-norm): bypasses the MLP entirely and
+  uses dataset-wide global mean/std for (de)normalization of spectra.
 - Produces figures: metric distributions, example reconstructions, latent space
   PCA, normalization diagnostics, and fractional error vs. wavelength.
 
 CLI:
-  python evaluate_autoencoder.py <grid_dir> <grid_name>
-                                 <autoencoder_model_path>
-                                 <norm_mlp_model_path>
+  python evaluate_autoencoder.py <grid_dir> <grid_name> <autoencoder_model_path>
+                                 [<norm_mlp_model_path>] [--global-norm] [--no-norm]
 
 Arguments:
 - grid_dir: Directory containing the spectral grid HDF5 files.
 - grid_name: File name of the grid to load.
 - autoencoder_model_path: Path to bundled AE msgpack produced by train_autoencoder.py.
 - norm_mlp_model_path: Path to bundled NormalizationMLP msgpack produced by train_norm_mlp.py.
+  Required unless --global-norm or --no-norm is provided.
+- --global-norm: Use dataset-wide global mean/std (no MLP required).
+- --no-norm: Disable normalization entirely; evaluate directly in log10 space
+  (no MLP required).
 
 Outputs:
 - Figures saved to figures/autoencoder_evaluation/.
@@ -29,6 +35,7 @@ import sys
 sys.path.append('..')
 
 import numpy as np
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import os
 
@@ -38,24 +45,16 @@ from train_norm_mlp import load_norm_mlp_model
 
 
 def compute_reconstruction_metrics(true_log_spectra, pred_log_spectra):
-    """Compute various reconstruction metrics on log-spectra."""
-    # Mean Squared Error
-    mse = np.mean((true_log_spectra - pred_log_spectra) ** 2, axis=1)
+    """Compute mean absolute fractional error on linear flux spectra."""
+    # Convert log spectra to linear flux for meaningful metrics
+    true_linear = 10**true_log_spectra
+    pred_linear = 10**pred_log_spectra
     
-    # Mean Absolute Error
-    mae = np.mean(np.abs(true_log_spectra - pred_log_spectra), axis=1)
+    # Fractional error: (pred - true) / true
+    fractional_error = (pred_linear - true_linear) / (true_linear + 1e-9)
+    mean_abs_frac_error = np.mean(np.abs(fractional_error), axis=1)
     
-    # Signal-to-Noise Ratio (calculated on log-spectra)
-    signal_var = np.var(true_log_spectra, axis=1)
-    noise_var = np.var(true_log_spectra - pred_log_spectra, axis=1)
-    # Add a small epsilon to avoid division by zero
-    snr = 10 * np.log10(signal_var / (noise_var + 1e-9))
-
-    return {
-        'mse': mse,
-        'mae': mae,
-        'snr': snr
-    }
+    return {'mean_abs_frac_error': mean_abs_frac_error}
 
 
 def plot_reconstruction(true_log_spectrum, pred_log_spectrum, wavelengths, save_path):
@@ -74,8 +73,8 @@ def plot_reconstruction(true_log_spectrum, pred_log_spectrum, wavelengths, save_
     # Plot zoomed region (e.g., around 4000-5000 Å)
     plt.subplot(2, 1, 2)
     mask = (wavelengths >= 4000) & (wavelengths <= 5000)
-    plt.plot(wavelengths[mask], true_log_spectrum[mask], label='True', alpha_color='blue', alpha=0.7)
-    plt.plot(wavelengths[mask], pred_log_spectrum[mask], label='Reconstructed', alpha_color='orange', alpha=0.7)
+    plt.plot(wavelengths[mask], true_log_spectrum[mask], label='True', color='blue', alpha=0.7)
+    plt.plot(wavelengths[mask], pred_log_spectrum[mask], label='Reconstructed', color='orange', alpha=0.7)
     plt.xlabel('Wavelength (Å)')
     plt.ylabel('Log Flux')
     plt.legend()
@@ -95,10 +94,26 @@ def plot_final_reconstruction(true_log_spec, pred_log_spec, wavelengths, save_pa
     plt.xlabel('Wavelength (Å)')
     plt.ylabel('Log Flux')
     
+    # Handle both per-spectrum (scalar) and per-wavelength (array) normalization
+    # Convert to numpy arrays for easier handling
+    true_mean_arr = np.asarray(true_mean)
+    pred_mean_arr = np.asarray(pred_mean)
+    true_std_arr = np.asarray(true_std)
+    pred_std_arr = np.asarray(pred_std)
+    
+    # Handle mixed normalization types (true is per-spectrum, pred could be per-wavelength)
+    # Show mean values for arrays, individual values for scalars
+    
+    def format_param(param_arr, param_name):
+        if param_arr.size == 1:
+            return f'{param_name}: {float(param_arr.item()):.2f}'
+        else:
+            return f'{param_name} (avg): {float(np.mean(param_arr)):.2f}'
+    
     title_text = (
         f'Final Reconstruction\n'
-        f'True Mean: {true_mean.item():.2f}, Pred Mean: {pred_mean.item():.2f}\n'
-        f'True Std: {true_std.item():.2f}, Pred Std: {pred_std.item():.2f}'
+        f'True {format_param(true_mean_arr, "Mean")}, Pred {format_param(pred_mean_arr, "Mean")}\n'
+        f'True {format_param(true_std_arr, "Std")}, Pred {format_param(pred_std_arr, "Std")}'
     )
     plt.title(title_text)
     
@@ -195,27 +210,13 @@ def plot_normalization_diagnostics(true_means, pred_means, true_stds, pred_stds,
 
 
 def plot_metrics_distribution(metrics, save_dir):
-    """Plot distributions of reconstruction metrics."""
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-    
-    # MSE distribution
-    axes[0].hist(metrics['mse'], bins=50)
-    axes[0].set_xlabel('MSE')
-    axes[0].set_ylabel('Count')
-    axes[0].set_title('Mean Squared Error Distribution')
-    
-    # MAE distribution
-    axes[1].hist(metrics['mae'], bins=50)
-    axes[1].set_xlabel('MAE')
-    axes[1].set_ylabel('Count')
-    axes[1].set_title('Mean Absolute Error Distribution')
-    
-    # SNR distribution
-    axes[2].hist(metrics['snr'], bins=50)
-    axes[2].set_xlabel('SNR (dB)')
-    axes[2].set_ylabel('Count')
-    axes[2].set_title('Signal-to-Noise Ratio Distribution')
-    
+    """Plot distribution of mean absolute fractional error."""
+    plt.figure(figsize=(8, 6))
+    plt.hist(metrics['mean_abs_frac_error'] * 100, bins=50, alpha=0.7, edgecolor='black')
+    plt.xlabel('Mean Absolute Fractional Error (%)')
+    plt.ylabel('Count')
+    plt.title('Mean Absolute Fractional Error Distribution\n(Computed on Linear Flux)')
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/reconstruction_metrics.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -251,46 +252,87 @@ def plot_latent_space(latent_vectors, ages, metallicities, save_path):
     plt.close()
 
 
-def plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path, epsilon=1e-9):
+def plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path, wl_min=2000.0, wl_max=10000.0):
     """
-    Computes and plots the median fractional error and percentile ranges
-    as a function of wavelength.
+    Computes and plots the median fractional error and percentile ranges vs. wavelength.
+    Fractional error is computed on linear flux: (pred_linear - true_linear) / (true_linear + 1e-9).
     """
-    # Calculate the fractional error, avoiding division by zero
-    fractional_error = (pred_spectra - true_spectra) / (true_spectra + epsilon)
+    # Convert log spectra to linear flux for fractional error calculation
+    true_linear = 10**true_spectra
+    pred_linear = 10**pred_spectra
     
-    # Compute the median and percentile statistics across the test set for each wavelength
+    # Calculate fractional error
+    fractional_error = (pred_linear - true_linear) / (true_linear + 1e-9)
+    
+    # Compute percentiles for sigma bands
     median_error = np.median(fractional_error, axis=0)
-    p16_error = np.percentile(fractional_error, 16, axis=0)
-    p84_error = np.percentile(fractional_error, 84, axis=0)
     
-    plt.figure(figsize=(14, 6))
-    
-    # Plot the median fractional error
-    plt.plot(wavelengths, median_error, label='Median Fractional Error', color='crimson')
-    
-    # Plot the 1-sigma equivalent percentile range as a shaded region
-    plt.fill_between(wavelengths, p16_error, p84_error, color='crimson', alpha=0.3,
-                     label='16th-84th Percentile Range')
-    
+    # Define percentiles for sigma bands  
+    p16, p84 = np.percentile(fractional_error, [16, 84], axis=0)      # 1-sigma
+    p2_5, p97_5 = np.percentile(fractional_error, [2.5, 97.5], axis=0) # 2-sigma
+    p0_15, p99_85 = np.percentile(fractional_error, [0.15, 99.85], axis=0) # 3-sigma
+
+    plt.figure(figsize=(14, 7))
+
+    # Plot sigma bands: 1σ and 2σ in red, 3σ in grey
+    plt.fill_between(wavelengths, p0_15 * 100, p99_85 * 100, color='grey', alpha=0.15, label='3σ (99.7%)')
+    plt.fill_between(wavelengths, p2_5 * 100, p97_5 * 100, color='red', alpha=0.15, label='2σ (95%)')
+    plt.fill_between(wavelengths, p16 * 100, p84 * 100, color='red', alpha=0.30, label='1σ (68%)')
+
+    # Plot the median error on top
+    plt.plot(wavelengths, median_error * 100, label='Median Fractional Error', color='black', lw=2)
+
+    # Zero and ±1% reference lines
+    plt.axhline(0, color='black', linestyle='--', lw=1)
+    plt.axhline(1, color='blue', linestyle='--', lw=1, label='+1%')
+    plt.axhline(-1, color='blue', linestyle='--', lw=1, label='-1%')
     plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Fractional Error (pred - true) / true')
-    plt.title('Fractional Error Distribution vs. Wavelength')
+    plt.ylabel('Fractional Error (%)')
+    plt.title('Fractional Error vs. Wavelength')
+    # Set x-limits first, then compute y-limits from data within that range
+    plt.xlim(wl_min, wl_max)
+
+    # Compute dynamic y-limits based on the fractional error distribution within x-lims
+    mask = (wavelengths >= wl_min) & (wavelengths <= wl_max)
+    fe_window = fractional_error[:, mask]
+    # Guard against empty masks
+    if fe_window.size > 0:
+        lower = np.percentile(fe_window, 0.5)
+        upper = np.percentile(fe_window, 99.5)
+        span = max(upper - lower, 1e-6)
+        pad = 0.10 * span
+        y_min = (lower - pad) * 100.0
+        y_max = (upper + pad) * 100.0
+        # Ensure zero is visible and bounds are ordered
+        y_min = min(y_min, 0.0)
+        y_max = max(y_max, 0.0)
+        plt.ylim(y_min, y_max)
     plt.legend()
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.ylim(-0.5, 0.5)  # Set a reasonable y-axis limit
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
 
 def main():
-    if len(sys.argv) != 5:
-        print("Usage: python evaluate_autoencoder.py <grid_dir> <grid_name> <autoencoder_model_path> <norm_mlp_model_path>")
+    # Manual CLI parsing to allow optional flag
+    args = sys.argv[1:]
+    use_global_norm = False
+    use_no_norm = False
+    if "--global-norm" in args:
+        args.remove("--global-norm")
+        use_global_norm = True
+    if "--no-norm" in args:
+        args.remove("--no-norm")
+        use_no_norm = True
+
+    if (use_no_norm and len(args) != 3) or ((not use_no_norm) and use_global_norm and len(args) != 3) or ((not use_no_norm) and (not use_global_norm) and len(args) != 4):
+        print("Usage: python evaluate_autoencoder.py <grid_dir> <grid_name> <autoencoder_model_path> [<norm_mlp_model_path>] [--global-norm] [--no-norm]")
         sys.exit(1)
-        
-    grid_dir, grid_name, ae_model_path, mlp_model_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+    grid_dir, grid_name, ae_model_path = args[0], args[1], args[2]
+    mlp_model_path = None if (use_global_norm or use_no_norm) else args[3]
     
     # Create output directory
     output_dir = f'figures/autoencoder_evaluation/'
@@ -302,6 +344,7 @@ def main():
         grid_dir=grid_dir,
         grid_name=grid_name,
         num_samples=N_samples,
+        norm=(None if use_no_norm else ('global' if use_global_norm else 'per-spectra')),
     )
     
     # Load models
@@ -309,9 +352,16 @@ def main():
     ae_model, ae_state, _ = load_autoencoder_model(ae_model_path)
     ae_variables = {'params': ae_state.params, 'batch_stats': ae_state.batch_stats}
     
-    print(f"Loading normalization MLP from {mlp_model_path}...")
-    mlp_model, mlp_params = load_norm_mlp_model(mlp_model_path)
-    mlp_variables = {'params': mlp_params}
+    if use_no_norm:
+        print("Using no normalization (direct log-space, no MLP).")
+        mlp_model, mlp_params, mlp_variables = None, None, None
+    elif use_global_norm:
+        print("Using global normalization (no MLP).")
+        mlp_model, mlp_params, mlp_variables = None, None, None
+    else:
+        print(f"Loading normalization MLP from {mlp_model_path}...")
+        mlp_model, mlp_params = load_norm_mlp_model(mlp_model_path)
+        mlp_variables = {'params': mlp_params}
 
     # --- Evaluation ---
     test_size = min(2000, len(dataset))
@@ -320,8 +370,14 @@ def main():
     # Get ground truth data
     conditions = dataset.conditions[test_indices]
     norm_true_spectra = dataset.spectra[test_indices]
-    true_means = dataset.true_spec_mean[test_indices]
-    true_stds = dataset.true_spec_std[test_indices]
+    if not use_no_norm:
+        # Handle global scalar mean/std by expanding to per-sample arrays for convenience
+        if np.isscalar(dataset.true_spec_mean) or (np.asarray(dataset.true_spec_mean).ndim == 0):
+            true_means = np.full((len(test_indices), 1), float(np.asarray(dataset.true_spec_mean)))
+            true_stds = np.full((len(test_indices), 1), float(np.asarray(dataset.true_spec_std)))
+        else:
+            true_means = dataset.true_spec_mean[test_indices]
+            true_stds = dataset.true_spec_std[test_indices]
     ages = dataset.ages[test_indices]
     metallicities = dataset.metallicities[test_indices]
     
@@ -331,16 +387,30 @@ def main():
     pred_norm_spectra = ae_model.apply(ae_variables, norm_true_spectra, training=False)
     latent_vectors = ae_model.apply(ae_variables, norm_true_spectra, method=ae_model.encode, training=False)
     
-    # 2. Get MLP predictions for the normalization parameters
-    pred_means, pred_stds = mlp_model.apply(mlp_variables, conditions)
+    # 2. Get normalization parameters or bypass
+    if use_no_norm:
+        pred_means, pred_stds = None, None
+    elif use_global_norm:
+        pred_means, pred_stds = true_means, true_stds
+    else:
+        pred_means, pred_stds = mlp_model.apply(mlp_variables, conditions)
 
     # 3. Combine predictions to get final log-flux spectra
-    pred_log_spectra = (pred_norm_spectra * pred_stds) + pred_means
-    true_log_spectra = (norm_true_spectra * true_stds) + true_means
+    if use_no_norm:
+        pred_log_spectra = pred_norm_spectra
+        true_log_spectra = norm_true_spectra
+    else:
+        pred_log_spectra = (pred_norm_spectra * pred_stds) + pred_means
+        true_log_spectra = (norm_true_spectra * true_stds) + true_means
     
     # --- Compute and Plot Metrics on Final Reconstruction ---
     print("Computing metrics on final reconstruction...")
     metrics = compute_reconstruction_metrics(true_log_spectra, pred_log_spectra)
+    
+    print("\nReconstruction Metrics Summary:")
+    print(f"Mean Absolute Fractional Error: {np.mean(metrics['mean_abs_frac_error']):.4f} ± {np.std(metrics['mean_abs_frac_error']):.4f} ({np.mean(metrics['mean_abs_frac_error'])*100:.2f}%)")
+    print(f"Median Absolute Fractional Error: {np.median(metrics['mean_abs_frac_error'])*100:.2f}%")
+    
     plot_metrics_distribution(metrics, output_dir)
     
     # --- Plot Example Reconstructions ---
@@ -348,16 +418,24 @@ def main():
     num_examples_to_plot = 5
     for i in range(num_examples_to_plot):
         # Plot the final combined reconstruction
-        plot_final_reconstruction(
-            true_log_spectra[i],
-            pred_log_spectra[i],
-            dataset.wavelength,
-            save_path=f'{output_dir}/final_reconstruction_example_{i}.png',
-            true_mean=true_means[i],
-            pred_mean=pred_means[i],
-            true_std=true_stds[i],
-            pred_std=pred_stds[i]
-        )
+        if use_no_norm:
+            plot_reconstruction(
+                true_log_spectra[i],
+                pred_log_spectra[i],
+                dataset.wavelength,
+                save_path=f'{output_dir}/final_reconstruction_example_{i}.png'
+            )
+        else:
+            plot_final_reconstruction(
+                true_log_spectra[i],
+                pred_log_spectra[i],
+                dataset.wavelength,
+                save_path=f'{output_dir}/final_reconstruction_example_{i}.png',
+                true_mean=true_means[i],
+                pred_mean=pred_means[i],
+                true_std=true_stds[i],
+                pred_std=pred_stds[i]
+            )
         # Plot the diagnostic for the autoencoder's normalized output
         plot_diagnostic_reconstruction(
             norm_true_spectra[i],
@@ -371,22 +449,47 @@ def main():
     plot_latent_space(latent_vectors, ages, metallicities, save_path=f'{output_dir}/latent_space.png')
 
     # --- Plot Normalization Parameter Diagnostics ---
-    print("Plotting normalization MLP diagnostics...")
-    plot_normalization_diagnostics(
-        true_means,
-        pred_means,
-        true_stds,
-        pred_stds,
-        save_path=f'{output_dir}/normalization_diagnostics.png'
+    if not (use_global_norm or use_no_norm):
+        print("Plotting normalization MLP diagnostics...")
+        plot_normalization_diagnostics(
+            true_means,
+            pred_means,
+            true_stds,
+            pred_stds,
+            save_path=f'{output_dir}/normalization_diagnostics.png'
+        )
+
+    # --- Evaluate Autoencoder Performance in Isolation ---
+    print("Evaluating autoencoder performance (using true normalization)...")
+    if use_no_norm:
+        # Already in final space
+        ae_pred_log_spectra = pred_norm_spectra
+        ae_true_log_spectra = norm_true_spectra
+    else:
+        # Use true normalization parameters to isolate autoencoder performance
+        ae_pred_log_spectra = (pred_norm_spectra * true_stds) + true_means
+        ae_true_log_spectra = (norm_true_spectra * true_stds) + true_means
+    
+    # Compute metrics for autoencoder-only performance
+    ae_metrics = compute_reconstruction_metrics(ae_true_log_spectra, ae_pred_log_spectra)
+    print("Autoencoder-Only Performance (using true normalization):")
+    print(f"  Mean Absolute Fractional Error: {np.mean(ae_metrics['mean_abs_frac_error']):.4f} ± {np.std(ae_metrics['mean_abs_frac_error']):.4f} ({np.mean(ae_metrics['mean_abs_frac_error'])*100:.2f}%)")
+    print(f"  Median Absolute Fractional Error: {np.median(ae_metrics['mean_abs_frac_error'])*100:.2f}%")
+    
+    # Plot autoencoder-only fractional error vs wavelength
+    print("Plotting autoencoder-only fractional error vs wavelength...")
+    plot_fractional_error_vs_wavelength(
+        ae_true_log_spectra,
+        ae_pred_log_spectra,
+        dataset.wavelength,
+        save_path=f'{output_dir}/autoencoder_only_fractional_error_vs_wavelength.png'
     )
 
     # --- Plot Fractional Error vs. Wavelength on Final Spectra ---
     print("Plotting fractional error of final reconstruction...")
-    true_linear_spectra = 10**true_log_spectra
-    pred_linear_spectra = 10**pred_log_spectra
     plot_fractional_error_vs_wavelength(
-        true_linear_spectra,
-        pred_linear_spectra,
+        true_log_spectra,
+        pred_log_spectra,
         dataset.wavelength,
         save_path=f'{output_dir}/fractional_error_vs_wavelength.png'
     )

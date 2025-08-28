@@ -51,15 +51,16 @@ def generate_spectrum(regressor, regressor_state, autoencoder, autoencoder_state
 
 
 def compute_metrics(true_spectra, pred_spectra):
-    """Compute various reconstruction metrics on log-spectra."""
-    mse = np.mean((true_spectra - pred_spectra) ** 2, axis=1)
-    mae = np.mean(np.abs(true_spectra - pred_spectra), axis=1)
+    """Compute mean absolute fractional error on linear flux spectra."""
+    # Convert log spectra to linear flux for meaningful metrics
+    true_linear = 10**true_spectra
+    pred_linear = 10**pred_spectra
     
-    # signal_var = np.var(true_spectra, axis=1)
-    # noise_var = np.var(true_spectra - pred_spectra, axis=1)
-    # snr = 10 * np.log10(signal_var / (noise_var + 1e-9))
+    # Fractional error: (pred - true) / true
+    fractional_error = (pred_linear - true_linear) / (true_linear + 1e-9)
+    mean_abs_frac_error = np.mean(np.abs(fractional_error), axis=1)
     
-    return {'mse': mse, 'mae': mae}
+    return {'mean_abs_frac_error': mean_abs_frac_error}
 
 
 def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, metallicity, save_path):
@@ -86,51 +87,17 @@ def plot_spectrum_comparison(true_spectrum, pred_spectrum, wavelengths, age, met
 
 
 def plot_metrics_distribution(metrics, save_dir):
-    """Plot distributions of reconstruction metrics."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    axes[0].hist(metrics['mse'], bins=50)
-    axes[0].set_title('Mean Squared Error Distribution')
-    axes[1].hist(metrics['mae'], bins=50)
-    axes[1].set_title('Mean Absolute Error Distribution')
-    # axes[2].hist(metrics['snr'], bins=50)
-    # axes[2].set_title('Signal-to-Noise Ratio Distribution')
-    # axes[2].set_xlabel('SNR (dB)')
+    """Plot distribution of mean absolute fractional error."""
+    plt.figure(figsize=(8, 6))
+    plt.hist(metrics['mean_abs_frac_error'] * 100, bins=50, alpha=0.7, edgecolor='black')
+    plt.xlabel('Mean Absolute Fractional Error (%)')
+    plt.ylabel('Count')
+    plt.title('Mean Absolute Fractional Error Distribution\n(Computed on Linear Flux)')
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/regressor_metrics_dist.png', dpi=200, bbox_inches='tight')
     plt.close()
 
-
-def plot_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path):
-    """
-    Computes and plots the median absolute error and percentile ranges
-    as a function of wavelength.
-    """
-    # Calculate the absolute error for each spectrum at each wavelength
-    abs_error = np.abs(true_spectra - pred_spectra)
-    
-    # Compute all percentiles simultaneously for efficiency
-    percentiles = np.percentile(abs_error, [16, 50, 84], axis=0)
-    p16_error, median_error, p84_error = percentiles[0], percentiles[1], percentiles[2]
-    
-    plt.figure(figsize=(14, 6))
-    
-    # Plot the median error
-    plt.plot(wavelengths, median_error, label='Median Absolute Error', color='blue')
-    
-    # Plot the 1-sigma equivalent percentile range as a shaded region
-    plt.fill_between(wavelengths, p16_error, p84_error, color='blue', alpha=0.3,
-                     label='16th-84th Percentile Range')
-    
-    plt.xlabel('Wavelength (Å)')
-    plt.ylabel('Absolute Error (Log Flux)')
-    plt.title('Error Distribution vs. Wavelength')
-    plt.legend()
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.yscale('log')
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
-    plt.close()
 
 
 def plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, wavelengths, save_path, wl_min=2000.0, wl_max=10000.0):
@@ -180,68 +147,101 @@ def plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, wavelengths,
 
 
 def main():
-    if len(sys.argv) != 6:
-        print("Usage: python evaluate_regressor.py <grid_dir> <grid_name> <autoencoder_path> <regressor_path> <norm_mlp_path>")
+    # Manual CLI to allow optional --global-norm and --no-norm flags
+    args = sys.argv[1:]
+    use_global_norm = False
+    use_no_norm = False
+    if "--global-norm" in args:
+        args.remove("--global-norm")
+        use_global_norm = True
+    if "--no-norm" in args:
+        args.remove("--no-norm")
+        use_no_norm = True
+
+    if (use_no_norm and len(args) != 4) or ((not use_no_norm) and use_global_norm and len(args) != 4) or ((not use_no_norm) and (not use_global_norm) and len(args) != 5):
+        print("Usage: python evaluate_regressor.py <grid_dir> <grid_name> <autoencoder_path> <regressor_path> [<norm_mlp_path>] [--global-norm] [--no-norm]")
         sys.exit(1)
 
-    grid_dir, grid_name, autoencoder_path, regressor_path, norm_mlp_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-    
-    _, _, test_dataset = load_data_regressor(grid_dir, grid_name, n_samples=int(1e3))
-    
+    grid_dir, grid_name, autoencoder_path, regressor_path = args[0], args[1], args[2], args[3]
+    norm_mlp_path = None if (use_global_norm or use_no_norm) else args[4]
+
+    _, _, test_dataset = load_data_regressor(
+        grid_dir, grid_name, n_samples=int(1e3),
+        norm=(None if use_no_norm else ('global' if use_global_norm else 'per-spectra'))
+    )
+
     print(f"Loading autoencoder from {autoencoder_path}...")
-    autoencoder, autoencoder_state, norm_params = load_autoencoder(autoencoder_path)
-    
+    autoencoder, autoencoder_state, _ = load_autoencoder(autoencoder_path)
+
     print(f"Loading regressor from {regressor_path}...")
     regressor, regressor_state = load_regressor(regressor_path)
-    
-    print(f"Loading normalization MLP from {norm_mlp_path}...")
-    norm_mlp, norm_mlp_params = load_norm_mlp_model(norm_mlp_path)
-    
+
+    if use_no_norm:
+        print("Using no normalization (direct log-space, no MLP).")
+        norm_mlp, norm_mlp_params = None, None
+    elif use_global_norm:
+        print("Using global normalization (no MLP).")
+        norm_mlp, norm_mlp_params = None, None
+    else:
+        print(f"Loading normalization MLP from {norm_mlp_path}...")
+        norm_mlp, norm_mlp_params = load_norm_mlp_model(norm_mlp_path)
+
     output_dir = 'figures/regressor_evaluation'
     os.makedirs(output_dir, exist_ok=True)
-    
+
     print(f"Evaluating model on {len(test_dataset)} test samples...")
-    
+
     # Vectorized evaluation - process all samples at once
     norm_ages = test_dataset.conditions[:, 0]
     norm_metallicities = test_dataset.conditions[:, 1]
-    
-    # Generate all predicted spectra in one batch (normalized)
+
+    # Generate all predicted spectra in one batch
     norm_pred_spectra = generate_spectrum(
         regressor, regressor_state, autoencoder, autoencoder_state, norm_ages, norm_metallicities
     )
-    
-    # Predict normalization parameters using the MLP
-    conditions = jnp.stack([norm_ages, norm_metallicities], axis=1)
-    norm_mlp_variables = {'params': norm_mlp_params}
-    pred_means, pred_stds = norm_mlp.apply(norm_mlp_variables, conditions)
-    
-    # Un-normalize spectra using appropriate normalization parameters
-    # True spectra: use true normalization parameters from dataset
-    test_true_mean = test_dataset.true_spec_mean  # Shape: (n_test_samples, 1)
-    test_true_std = test_dataset.true_spec_std    # Shape: (n_test_samples, 1)
-    true_spectra = (test_dataset.spectra * test_true_std) + test_true_mean
-    
-    # Predicted spectra: use MLP-predicted normalization parameters
-    pred_spectra = (norm_pred_spectra * pred_stds) + pred_means
-    
+
+    # Compute final spectra depending on normalization strategy
+    if use_no_norm:
+        true_spectra = test_dataset.spectra
+        pred_spectra = norm_pred_spectra
+    else:
+        # Predict or fetch normalization parameters
+        if use_global_norm:
+            if np.isscalar(test_dataset.true_spec_mean) or (np.asarray(test_dataset.true_spec_mean).ndim == 0):
+                pred_means = np.full((len(test_dataset), 1), float(np.asarray(test_dataset.true_spec_mean)))
+                pred_stds = np.full((len(test_dataset), 1), float(np.asarray(test_dataset.true_spec_std)))
+            else:
+                pred_means = test_dataset.true_spec_mean
+                pred_stds = test_dataset.true_spec_std
+        else:
+            conditions = jnp.stack([norm_ages, norm_metallicities], axis=1)
+            norm_mlp_variables = {'params': norm_mlp_params}
+            pred_means, pred_stds = norm_mlp.apply(norm_mlp_variables, conditions)
+
+        # True spectra: use dataset-provided normalization
+        if np.isscalar(test_dataset.true_spec_mean) or (np.asarray(test_dataset.true_spec_mean).ndim == 0):
+            test_true_mean = np.full((len(test_dataset), 1), float(np.asarray(test_dataset.true_spec_mean)))
+            test_true_std = np.full((len(test_dataset), 1), float(np.asarray(test_dataset.true_spec_std)))
+        else:
+            test_true_mean = test_dataset.true_spec_mean
+            test_true_std = test_dataset.true_spec_std
+        true_spectra = (test_dataset.spectra * test_true_std) + test_true_mean
+        pred_spectra = (norm_pred_spectra * pred_stds) + pred_means
+
     # Un-normalize physical parameters for plotting
     ages = np.array([test_dataset.unnormalize_age(age) for age in norm_ages])
     metallicities = np.array([test_dataset.unnormalize_metallicity(met) for met in norm_metallicities])
-    
+
     metrics = compute_metrics(true_spectra, pred_spectra)
     print("\nReconstruction Metrics Summary:")
-    print(f"MSE: {np.mean(metrics['mse']):.4f} ± {np.std(metrics['mse']):.4f}")
-    print(f"MAE: {np.mean(metrics['mae']):.4f} ± {np.std(metrics['mae']):.4f}")
-    
+    print(f"Mean Absolute Fractional Error: {np.mean(metrics['mean_abs_frac_error']):.4f} ± {np.std(metrics['mean_abs_frac_error']):.4f} ({np.mean(metrics['mean_abs_frac_error'])*100:.2f}%)")
+    print(f"Median Absolute Fractional Error: {np.median(metrics['mean_abs_frac_error'])*100:.2f}%")
+
     plot_metrics_distribution(metrics, output_dir)
-    
-    print("Plotting error vs wavelength distribution...")
-    plot_error_vs_wavelength(true_spectra, pred_spectra, test_dataset.wavelength, f'{output_dir}/error_vs_wavelength.png')
-    
+
     print("Plotting fractional error vs wavelength...")
     plot_fractional_error_vs_wavelength(true_spectra, pred_spectra, test_dataset.wavelength, f'{output_dir}/fractional_error_vs_wavelength.png')
-    
+
     print("Saving example spectrum comparison plots...")
     for i in range(min(5, len(test_dataset))):
         plot_spectrum_comparison(

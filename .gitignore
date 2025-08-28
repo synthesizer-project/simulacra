@@ -1,3 +1,7 @@
+autoencoder_jax/logs/
+*.h5
+
+
 *.msgpack
 *.png
 

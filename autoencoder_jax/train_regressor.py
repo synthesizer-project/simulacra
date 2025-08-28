@@ -273,9 +273,16 @@ def create_latent_representations(autoencoder, autoencoder_state, dataset, batch
     return jnp.concatenate(latent_vectors)
 
 
-def load_data_regressor(grid_dir, grid_name, n_samples):
-    """Load and preprocess data for the regressor."""
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=n_samples)
+def load_data_regressor(grid_dir, grid_name, n_samples, norm: str = 'per-spectra'):
+    """Load and preprocess data for the regressor.
+
+    Args:
+        grid_dir: Directory of spectral grids
+        grid_name: Grid filename
+        n_samples: Number of samples to draw
+        norm: Normalization mode for spectra ('per-spectra', 'global', or 'zscore')
+    """
+    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=n_samples, norm=norm)
     perm = jax.random.permutation(jax.random.PRNGKey(0), len(dataset))
     train_size, val_size = int(0.7 * len(dataset)), int(0.15 * len(dataset))
     train_ds = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[:train_size])
@@ -286,7 +293,21 @@ def load_data_regressor(grid_dir, grid_name, n_samples):
 
 def main():
     print(f"JAX devices: {jax.devices()}")
-    
+
+    # Parse CLI: python train_regressor.py <grid_dir> <grid_name> [--global-norm] [--no-norm] [--samples N] [--epochs E] [--batch-size B]
+    args = sys.argv[1:]
+    use_global_norm = False
+    if "--global-norm" in args:
+        args.remove("--global-norm")
+        use_global_norm = True
+    use_no_norm = False
+    if "--no-norm" in args:
+        args.remove("--no-norm")
+        use_no_norm = True
+    if len(args) < 2:
+        print("Usage: python train_regressor.py <grid_dir> <grid_name> [--global-norm] [--no-norm] [--samples N] [--epochs E] [--batch-size B]")
+        sys.exit(1)
+
     # Load the trained autoencoder
     autoencoder_path = 'models/autoencoder_simple_dense.msgpack'
     # load_model returns (model, state, norm_params). We don't need norm_params here.
@@ -295,8 +316,28 @@ def main():
     
     # Load the dataset
     N_samples = int(1e4)
-    grid_dir, grid_name = sys.argv[1], sys.argv[2]
-    train_dataset, val_dataset, test_dataset = load_data_regressor(grid_dir, grid_name, N_samples)
+    grid_dir, grid_name = args[0], args[1]
+
+    # Optional args
+    def get_arg(flag, cast):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return cast(args[i+1])
+        return None
+    def get_flag(flag):
+        return flag in args
+    N_samples = get_arg('--samples', int) or N_samples
+    num_epochs = get_arg('--epochs', int) or 200
+    batch_size = get_arg('--batch-size', int) or 128
+    if use_no_norm:
+        norm_mode = None
+        norm_label = 'none'
+    else:
+        norm_mode = 'global' if use_global_norm else 'per-spectra'
+        norm_label = norm_mode
+    print(f"Normalization mode: {norm_label}")
+    train_dataset, val_dataset, test_dataset = load_data_regressor(grid_dir, grid_name, N_samples, norm=norm_mode)
     rng = jax.random.PRNGKey(0)
 
     # Create latent representations
@@ -319,8 +360,8 @@ def main():
         val_dataset=val_dataset,
         train_latent=train_latent,
         val_latent=val_latent,
-        num_epochs=200,
-        batch_size=128,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
         learning_rate=1e-3,
         weight_decay=1e-5,
         rng=rng,
