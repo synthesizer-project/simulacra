@@ -1,8 +1,38 @@
+"""
+Train a spectrum autoencoder (Flax/JAX) on synthetic spectra.
+
+Description:
+- Samples spectra from a synthesizer Grid via SpectralDatasetSynthesizer,
+  normalizes them, and trains a dense autoencoder to reconstruct log10 spectra.
+- Saves a single bundled msgpack with model hyperparameters, parameters,
+  batch statistics, and dataset normalization scalars for later inference.
+
+CLI:
+  python train_autoencoder.py <grid_dir> <grid_name>
+                              [--samples N] [--epochs E]
+                              [--batch-size B] [--save PATH]
+
+Arguments:
+- grid_dir: Directory containing the spectral grid HDF5 files.
+- grid_name: File name of the grid to load (e.g. bc03-....hdf5).
+- --samples: Number of spectra to sample (default: 10000).
+- --epochs: Number of training epochs (default: 100).
+- --batch-size: Mini-batch size (default: 64).
+- --save: Output path for the bundled model (default:
+          models/autoencoder_simple_dense.msgpack).
+
+Outputs:
+- Bundled model at the provided --save path.
+
+Notes:
+- Uses a dense architecture by default (latent=128, dropout=0.2, ReLU).
+- JAX selects available devices automatically; set XLA flags as needed.
+"""
+
 import sys
 sys.path.append('..')
 
 import numpy as np
-import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -25,10 +55,11 @@ def save_model(model, state, dataset, model_path):
         'decoder_features': model.decoder_features,
         'dropout_rate': model.dropout_rate,
         'activation_name': getattr(model, 'activation_name', 'relu'),
+        'architecture': getattr(model, 'architecture', 'dense'), # Save architecture type
     }
     norm_params = {
-        'spec_mean': dataset.spec_mean,
-        'spec_std': dataset.spec_std,
+        'spec_mean': dataset.true_spec_mean,
+        'spec_std': dataset.true_spec_std,
     }
     state_dict = {
         'params': state.params,
@@ -53,6 +84,9 @@ def load_model(model_path):
     state_dict = bundled_data['state_dict']
     norm_params = bundled_data.get('norm_params', None)  # For backward compatibility
     
+    # Add architecture to hyperparams for loading, default to 'dense' for older models
+    hyperparams['architecture'] = hyperparams.get('architecture', 'dense')
+
     # Robustly handle features that might be stored as lists or dicts,
     # and ensure they are integers. This prevents data type errors.
     for key in ['encoder_features', 'decoder_features']:
@@ -81,6 +115,8 @@ def load_model(model_path):
 
 
 # === Model Architecture ===
+
+# --- Dense Architecture ---
 class SpectrumEncoder(nn.Module):
     features: Sequence[int] = (1024, 512, 256)
     latent_dim: int = 128
@@ -125,6 +161,92 @@ class SpectrumDecoder(nn.Module):
         x = nn.Dense(self.spectrum_dim, kernel_init=nn.initializers.he_normal())(x)
         return x
 
+# --- Convolutional Architecture ---
+class ConvSpectrumEncoder(nn.Module):
+    """A 1D convolutional encoder for spectra."""
+    features: Sequence[int] = (16, 32, 64)
+    kernel_sizes: Sequence[int] = (7, 5, 3)
+    strides: Sequence[int] = (2, 2, 2)
+    latent_dim: int = 128
+    dropout_rate: float = 0.2
+    activation_name: str = 'relu'
+
+    @nn.compact
+    def __call__(self, x, training: bool = True):
+        # Add a channel dimension for convolution
+        x = jnp.expand_dims(x, axis=-1)
+
+        for i, (feat, k_size, stride) in enumerate(zip(self.features, self.kernel_sizes, self.strides)):
+            x = nn.Conv(
+                features=feat,
+                kernel_size=(k_size,),
+                strides=(stride,),
+                padding='SAME',
+                kernel_init=nn.initializers.he_normal()
+            )(x)
+            x = nn.BatchNorm(use_running_average=not training, momentum=0.9)(x)
+            if self.activation_name == 'relu':
+                x = nn.relu(x)
+            elif self.activation_name == 'parametric_gated':
+                x = ParametricGatedActivation(features=feat)(x)
+            else:
+                raise ValueError(f"Unsupported activation: {self.activation_name}")
+            if training:
+                x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+        
+        x = x.reshape((x.shape[0], -1)) # Flatten
+        x = nn.Dense(self.latent_dim, kernel_init=nn.initializers.he_normal())(x)
+        return x
+
+class ConvSpectrumDecoder(nn.Module):
+    """A 1D transposed convolutional decoder for spectra."""
+    features: Sequence[int] = (64, 32, 16)
+    kernel_sizes: Sequence[int] = (3, 5, 7)
+    strides: Sequence[int] = (2, 2, 2)
+    spectrum_dim: int = 10787
+    encoder_features: Sequence[int] = (16, 32, 64)
+    encoder_strides: Sequence[int] = (2, 2, 2)
+    dropout_rate: float = 0.2
+    activation_name: str = 'relu'
+
+    @nn.compact
+    def __call__(self, x, training: bool = True):
+        conv_output_dim = self.spectrum_dim
+        for stride in self.encoder_strides:
+            conv_output_dim = (conv_output_dim + stride - 1) // stride
+        
+        dense_features = conv_output_dim * self.encoder_features[-1]
+
+        x = nn.Dense(dense_features, kernel_init=nn.initializers.he_normal())(x)
+        x = x.reshape((x.shape[0], conv_output_dim, self.encoder_features[-1]))
+
+        for i, (feat, k_size, stride) in enumerate(zip(self.features, self.kernel_sizes, self.strides)):
+            x = nn.ConvTranspose(
+                features=feat,
+                kernel_size=(k_size,),
+                strides=(stride,),
+                padding='SAME',
+                kernel_init=nn.initializers.he_normal()
+            )(x)
+            x = nn.BatchNorm(use_running_average=not training, momentum=0.9)(x)
+            if self.activation_name == 'relu':
+                x = nn.relu(x)
+            elif self.activation_name == 'parametric_gated':
+                x = ParametricGatedActivation(features=feat)(x)
+            else:
+                raise ValueError(f"Unsupported activation: {self.activation_name}")
+            if training:
+                x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+
+        x = nn.ConvTranspose(
+            features=1, kernel_size=(self.kernel_sizes[-1],), padding='SAME'
+        )(x)
+        
+        x = x[:, :self.spectrum_dim, :]
+        x = jnp.squeeze(x, axis=-1)
+        return x
+
+
 class SpectrumAutoencoder(nn.Module):
     spectrum_dim: int
     latent_dim: int
@@ -132,20 +254,46 @@ class SpectrumAutoencoder(nn.Module):
     decoder_features: Sequence[int]
     dropout_rate: float
     activation_name: str = 'relu'
+    architecture: str = 'dense'
     
     def setup(self):
-        self.encoder = SpectrumEncoder(
-            features=self.encoder_features,
-            latent_dim=self.latent_dim,
-            dropout_rate=self.dropout_rate,
-            activation_name=self.activation_name
-        )
-        self.decoder = SpectrumDecoder(
-            features=self.decoder_features,
-            spectrum_dim=self.spectrum_dim,
-            dropout_rate=self.dropout_rate,
-            activation_name=self.activation_name
-        )
+        if self.architecture == 'dense':
+            self.encoder = SpectrumEncoder(
+                features=self.encoder_features,
+                latent_dim=self.latent_dim,
+                dropout_rate=self.dropout_rate,
+                activation_name=self.activation_name
+            )
+            self.decoder = SpectrumDecoder(
+                features=self.decoder_features,
+                spectrum_dim=self.spectrum_dim,
+                dropout_rate=self.dropout_rate,
+                activation_name=self.activation_name
+            )
+        elif self.architecture == 'conv':
+            conv_kernel_sizes = (7, 5, 3)
+            conv_strides = (2, 2, 2)
+            self.encoder = ConvSpectrumEncoder(
+                features=self.encoder_features,
+                kernel_sizes=conv_kernel_sizes,
+                strides=conv_strides,
+                latent_dim=self.latent_dim,
+                dropout_rate=self.dropout_rate,
+                activation_name=self.activation_name
+            )
+            self.decoder = ConvSpectrumDecoder(
+                features=self.decoder_features,
+                kernel_sizes=tuple(reversed(conv_kernel_sizes)),
+                strides=tuple(reversed(conv_strides)),
+                spectrum_dim=self.spectrum_dim,
+                encoder_features=self.encoder_features,
+                encoder_strides=conv_strides,
+                dropout_rate=self.dropout_rate,
+                activation_name=self.activation_name
+            )
+        else:
+            raise ValueError(f"Unsupported architecture: '{self.architecture}'")
+
     
     def encode(self, spectrum, training: bool = True):
         """Encodes a spectrum into a latent vector. To be called via .apply(..., method='encode')"""
@@ -198,46 +346,45 @@ def create_train_state(rng, model, learning_rate, weight_decay=1e-4):
 @jax.jit
 def train_step(state, batch, rng):
     """Performs a single training step."""
+    _, norm_spectra = batch # Unpack, we only need the spectra for the AE
+    
     def loss_fn(params, rng):
-        spectrum = batch
         variables = {'params': params, 'batch_stats': state.batch_stats}
         rng, dropout_rng = jax.random.split(rng)
         
-        # We need to call the top-level SpectrumAutoencoder's apply method
-        pred_spectrum, new_model_state = state.apply_fn(
+        pred_spectra, new_model_state = state.apply_fn(
             variables,
-            spectrum,
+            norm_spectra,
             mutable=['batch_stats'],
             training=True,
             rngs={'dropout': dropout_rng}
         )
-        # Add L2 regularization
-        l2_loss = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
-        reconstruction_loss = jnp.mean((pred_spectrum - spectrum) ** 2)
-        loss = reconstruction_loss + 1e-4 * l2_loss
-        return loss, (new_model_state, reconstruction_loss, l2_loss)
+        
+        loss = jnp.mean((pred_spectra - norm_spectra) ** 2)
+        return loss, new_model_state
     
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, (new_model_state, recon_loss, l2_loss)), grads = grad_fn(state.params, rng)
+    (loss, new_model_state), grads = grad_fn(state.params, rng)
     
-    # Create a new state with updated gradients and batch stats
     state = state.apply_gradients(
         grads=grads,
         batch_stats=new_model_state['batch_stats']
     )
-    return state, loss, recon_loss, l2_loss
+    return state, loss
 
 @jax.jit
 def eval_step(state, batch):
     """Performs a single evaluation step."""
-    spectrum = batch
+    _, norm_spectra = batch # Unpack, we only need the spectra for the AE
     variables = {'params': state.params, 'batch_stats': state.batch_stats}
-    pred_spectrum = state.apply_fn(
+    
+    pred_spectra = state.apply_fn(
         variables,
-        spectrum,
+        norm_spectra,
         training=False
     )
-    loss = jnp.mean((pred_spectrum - spectrum) ** 2)
+    
+    loss = jnp.mean((pred_spectra - norm_spectra) ** 2)
     return loss
 
 def train_epoch(state, train_ds, batch_size, rng):
@@ -249,21 +396,15 @@ def train_epoch(state, train_ds, batch_size, rng):
     perms = perms[:steps_per_epoch * batch_size]
     perms = perms.reshape((steps_per_epoch, batch_size))
     
-    epoch_loss, epoch_recon_loss, epoch_l2_loss = [], [], []
+    epoch_loss = []
     
     for perm in perms:
-        batch = train_ds.spectra[perm]
+        batch = (train_ds.conditions[perm], train_ds.spectra[perm])
         rng, step_rng = jax.random.split(rng)
-        state, loss, recon_loss, l2_loss = train_step(state, batch, step_rng)
+        state, loss = train_step(state, batch, step_rng)
         epoch_loss.append(loss)
-        epoch_recon_loss.append(recon_loss)
-        epoch_l2_loss.append(l2_loss)
     
-    return state, {
-        'total_loss': np.mean(epoch_loss),
-        'recon_loss': np.mean(epoch_recon_loss),
-        'l2_loss': np.mean(epoch_l2_loss)
-    }, rng
+    return state, {'loss': np.mean(epoch_loss)}, rng
 
 def eval_model(state, test_ds, batch_size):
     """Evaluates the model on the test set."""
@@ -272,7 +413,8 @@ def eval_model(state, test_ds, batch_size):
     
     all_losses = []
     for i in range(steps_per_epoch):
-        batch = test_ds.spectra[i * batch_size:(i + 1) * batch_size]
+        start, end = i * batch_size, (i + 1) * batch_size
+        batch = (test_ds.conditions[start:end], test_ds.spectra[start:end])
         loss = eval_step(state, batch)
         all_losses.append(loss)
     
@@ -280,7 +422,7 @@ def eval_model(state, test_ds, batch_size):
 
 def train_and_evaluate(
     model, train_ds, test_ds, num_epochs, batch_size, learning_rate, rng,
-    patience=10, min_delta=1e-4, lr_patience=3, lr_factor=0.5, min_lr=1e-7,
+    patience=10, min_delta=1e-4, lr_patience=5, lr_factor=0.5, min_lr=1e-7,
     weight_decay=1e-4, trial=None, verbose=True, save_path=None
 ):
     """Trains the model and evaluates it."""
@@ -298,11 +440,11 @@ def train_and_evaluate(
         state, train_losses_epoch, rng = train_epoch(state, train_ds, batch_size, input_rng)
         test_loss = eval_model(state, test_ds, batch_size)
         
-        train_losses.append(train_losses_epoch['total_loss'])
+        train_losses.append(train_losses_epoch['loss'])
         test_losses.append(test_loss)
         
         if verbose:
-            print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_losses_epoch['total_loss']:.4f}, Test Loss: {test_loss:.4f}, LR: {current_lr:.2e}")
+            print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_losses_epoch['loss']:.4f} | Test Loss: {test_loss:.4f} | LR: {current_lr:.2e}")
         
         if test_loss < best_test_loss - min_delta:
             best_test_loss = test_loss
@@ -324,11 +466,6 @@ def train_and_evaluate(
                     current_lr = new_lr
                     lr_no_improve_epochs = 0
                     
-                    # More efficient learning rate update.
-                    # This directly mutates the learning rate in the optimizer state
-                    # without requiring a full state re-initialization.
-                    # The optimizer state is a tuple: (ClipState, InjectHyperparamsState)
-                    # We modify the hyperparams dict in the InjectHyperparamsState at index 1.
                     state.opt_state[1].hyperparams['learning_rate'] = current_lr
         
         if trial:
@@ -357,33 +494,129 @@ def load_data(grid_dir, grid_name, n_samples):
     test_dataset = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[split:])
     return train_dataset, test_dataset, rng
 
+
+def plot_training_validation_loss(
+    train_losses,
+    val_losses,
+    save_dir: str = 'figures/autoencoder_evaluation',
+    filename: str = 'loss_vs_epoch.png',
+    use_log10: bool = True,
+    title: str = 'Autoencoder Training and Validation Loss',
+):
+    """Plots training and validation loss vs. epoch and saves the figure.
+
+    Args:
+        train_losses: Sequence of training loss values per epoch.
+        val_losses: Sequence of validation loss values per epoch.
+        save_dir: Directory where the figure will be saved.
+        filename: Filename for the saved figure (PNG).
+        use_log10: If True, plot log10 of the losses.
+        title: Plot title.
+
+    Returns:
+        The full path to the saved figure.
+    """
+    import os
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    epochs = np.arange(1, len(train_losses) + 1)
+    train_arr = np.asarray(train_losses)
+    val_arr = np.asarray(val_losses)
+    if use_log10:
+        eps = 1e-12
+        train_arr = np.log10(np.clip(train_arr, eps, None))
+        val_arr = np.log10(np.clip(val_arr, eps, None))
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_arr, label='Training Loss', color='#1f77b4')
+    plt.plot(epochs, val_arr, label='Validation Loss', color='#ff7f0e')
+    plt.xlabel('Epoch')
+    plt.ylabel('log10 MSE Loss' if use_log10 else 'MSE Loss')
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+
+    out_path = os.path.join(save_dir, filename)
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    return out_path
+
 def main():
     print(f"JAX devices: {jax.devices()}")
     
-    N_samples = int(1e4)
+    # Basic CLI: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]
+    if len(sys.argv) < 3:
+        print("Usage: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]")
+        sys.exit(1)
+
     grid_dir, grid_name = sys.argv[1], sys.argv[2]
+    # Defaults
+    N_samples = int(1e4)
+    num_epochs = 100
+    batch_size = 64
+    save_path = 'models/autoencoder_simple_dense.msgpack'
+
+    # Parse optional args
+    args = sys.argv[3:]
+    def get_arg(flag, cast):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return cast(args[i+1])
+        return None
+    N_samples = get_arg('--samples', int) or N_samples
+    num_epochs = get_arg('--epochs', int) or num_epochs
+    batch_size = get_arg('--batch-size', int) or batch_size
+    save_path = get_arg('--save', str) or save_path
+
     train_dataset, test_dataset, rng = load_data(grid_dir, grid_name, N_samples)
     
+    print("--- Using Standard Dense Architecture ---")
     model = SpectrumAutoencoder(
         spectrum_dim=train_dataset.n_wavelength,
         latent_dim=128,
-        encoder_features=(1024, 512, 256),
-        decoder_features=(256, 512, 1024),
+        encoder_features=(2048, 1024, 512),
+        decoder_features=(512, 1024, 2048),
         dropout_rate=0.2,
-        activation_name='parametric_gated'
+        activation_name='relu',
+        architecture='dense'
     )
-    
-    train_and_evaluate(
+    learning_rate = 1e-4
+
+    state, train_losses, test_losses, best_test_loss = train_and_evaluate(
         model=model,
         train_ds=train_dataset,
         test_ds=test_dataset,
-        num_epochs=100,
-        batch_size=64,
-        learning_rate=1e-3,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
         rng=rng,
         weight_decay=1e-4,
-        save_path='models/best_autoencoder.msgpack'
+        save_path=save_path
     )
 
+    # Save loss curves to figures directory with a timestamped filename
+    try:
+        from datetime import datetime
+        ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        save_dir = 'figures/autoencoder_evaluation'
+        fname = f"loss_vs_epoch_{model.architecture}_z{model.latent_dim}_{len(train_losses)}ep_{ts}.png"
+        out_path = plot_training_validation_loss(
+            train_losses=train_losses,
+            val_losses=test_losses,
+            save_dir=save_dir,
+            filename=fname,
+            use_log10=True,
+            title='Autoencoder Training and Validation Loss',
+        )
+        print(f"Saved loss plot to {out_path}")
+    except Exception as e:
+        print(f"Could not save loss plot: {e}")
+
 if __name__ == "__main__":
-    main() 
+    main()

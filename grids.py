@@ -1,4 +1,3 @@
-import h5py
 from scipy.stats import qmc
 import jax.numpy as jnp
 import numpy as np
@@ -9,70 +8,7 @@ from synthesizer.emission_models import IncidentEmission
 from unyt import Msun, yr, angstrom
 
 
-# class SpectralDatasetJAX:
-#     def __init__(
-#         self,
-#         h5_path='example_grid.hdf5',
-#         spec_type='incident',
-#         parent_dataset=None,
-#         split=None,
-#         ages='log10age',
-#         metallicity='metallicity',
-#     ):
-
-#         if parent_dataset is not None:
-#             self.spectra = parent_dataset.spectra
-#             self.wavelength = parent_dataset.wavelength
-#             self.ages = parent_dataset.ages
-#             self.metallicities = parent_dataset.metallicities
-#             self.conditions = parent_dataset.conditions
-#             self.n_wavelength = parent_dataset.n_wavelength
-#             self.n_age = parent_dataset.n_age
-#             self.n_met = parent_dataset.n_met
-#         else:
-#             with h5py.File(h5_path, 'r') as f:
-#                 self.spectra = jnp.array(f[f'spectra/{spec_type}'][:], dtype=jnp.float32)
-#                 self.wavelength = jnp.array(f['spectra/wavelength'][:], dtype=jnp.float32)
-#                 self.ages = jnp.array(f[f'axes/{ages}'][:], dtype=jnp.float32)
-#                 self.metallicities = jnp.array(f[f'axes/{metallicity}'][:], dtype=jnp.float32)
-
-#             # Filter spectra and wavelength
-#             mask = (self.wavelength > 1000) & (self.wavelength < 10000)
-#             self.spectra = self.spectra[:, :, mask]
-#             self.wavelength = self.wavelength[mask]
-
-#             # Get dimensions
-#             self.n_age, self.n_met, self.n_wavelength = self.spectra.shape
-
-#         if split is not None:
-#             self.spectra = self.spectra[split]
-#             self.ages = self.ages[split]
-#             self.metallicities = self.metallicities[split]
-#             self.conditions = self.conditions[split]
-        
-#         if parent_dataset is None:
-#             # Normalize parameters
-#             self.ages = (self.ages - self.ages.mean()) / self.ages.std()
-#             self.metallicities = (self.metallicities - self.metallicities.mean()) / self.metallicities.std()
-            
-#             # Create all combinations of parameters
-#             self.conditions = jnp.stack(jnp.meshgrid(self.ages, self.metallicities, indexing='ij')).reshape(2, -1).T
-
-#             # Reshape spectra to match conditions
-#             self.spectra = self.spectra.reshape(-1, self.n_wavelength)
-
-#             # Log and normalize spectra
-#             self.spectra = jnp.log10(self.spectra)
-#             self.spectra = (self.spectra - self.spectra.mean(axis=1, keepdims=True)) / self.spectra.std(axis=1, keepdims=True)
-    
-#     def __len__(self):
-#         return len(self.conditions)
-    
-#     def __getitem__(self, idx):
-#         return self.conditions[idx], self.spectra[idx]
-    
-
-def LHGridSpectra(grid_dir, grid_name, num_samples=1000):
+def LHGridSpectra(grid_dir, grid_name, num_samples=1000, seed=None):
     grid = Grid(grid_dir=grid_dir, grid_name=grid_name, read_lines=False)
 
     N = num_samples
@@ -82,7 +18,7 @@ def LHGridSpectra(grid_dir, grid_name, num_samples=1000):
     print("Age limits: ", age_lims)
     print("Metallicity limits: ", met_lims)
 
-    sampler = qmc.LatinHypercube(d=2)
+    sampler = qmc.LatinHypercube(d=2, seed=seed)
     samples = qmc.scale(sampler.random(n=N), (age_lims[0], met_lims[0]), (age_lims[1], met_lims[1]))
     
     initial_masses = np.ones(N) * Msun
@@ -107,7 +43,21 @@ def LHGridSpectra(grid_dir, grid_name, num_samples=1000):
 
 
 class SpectralDatasetSynthesizer:
-    def __init__(self, grid_dir=None, grid_name=None, num_samples=1000, parent_dataset=None, split=None):
+    def __init__(
+        self,
+        grid_dir=None,
+        grid_name=None,
+        num_samples=1000,
+        parent_dataset=None,
+        split=None,
+        norm='per-spectra',
+        seed=None,
+        true_spec_mean=None,
+        true_spec_std=None,
+        compute_lambda_stats=False,
+        zscore_mean_lambda=None,
+        zscore_std_lambda=None
+    ):
 
         if parent_dataset is not None:
             # Inherit all data and parameters from the parent dataset
@@ -118,18 +68,22 @@ class SpectralDatasetSynthesizer:
             self.conditions = parent_dataset.conditions
             self.n_wavelength = parent_dataset.n_wavelength
             
-            # Carry over normalization parameters from the parent
-            self.spec_mean = parent_dataset.spec_mean
-            self.spec_std = parent_dataset.spec_std
+            # Carry over normalization parameters from the parent for physical params
             self.age_mean = parent_dataset.age_mean
             self.age_std = parent_dataset.age_std
             self.met_mean = parent_dataset.met_mean
             self.met_std = parent_dataset.met_std
+            self.true_spec_mean = parent_dataset.true_spec_mean
+            self.true_spec_std = parent_dataset.true_spec_std
             
         else:
             # Load raw data if this is a new dataset
-            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(grid_dir, grid_name, num_samples)
+            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(grid_dir, grid_name, num_samples, seed=seed)
             self.n_wavelength = self.spectra.shape[1]
+
+            # Reshape and log-transform spectra
+            self.spectra = self.spectra.reshape(-1, self.n_wavelength)
+            self.spectra = jnp.log10(self.spectra)
 
             # --- Pre-computation before any splitting ---
             # Store normalization params for physical parameters
@@ -139,20 +93,61 @@ class SpectralDatasetSynthesizer:
             # Normalize physical parameters
             norm_ages = (self.ages - self.age_mean) / self.age_std
             norm_mets = (self.metallicities - self.met_mean) / self.met_std
-            
+        
             # Create conditions from normalized parameters
             self.conditions = jnp.stack([norm_ages, norm_mets]).T
 
-            # Reshape and log-transform spectra
-            self.spectra = self.spectra.reshape(-1, self.n_wavelength)
-            self.spectra = jnp.log10(self.spectra)
+            if norm:
+                if norm == 'per-spectra':
+                    # Store the true per-spectrum mean and std for the normalization MLP to learn
+                    self.true_spec_mean = self.spectra.mean(axis=1, keepdims=True)
+                    self.true_spec_std = self.spectra.std(axis=1, keepdims=True)
+                elif norm == 'global':
+                    if true_spec_mean is not None and true_spec_std is not None:
+                        # Use pre-computed normalization values if provided
+                        print("Using pre-computed global normalization values.")
+                        self.true_spec_mean = true_spec_mean
+                        self.true_spec_std = true_spec_std
+                    else:
+                        # Otherwise, compute them from the loaded data
+                        self.true_spec_mean = self.spectra.mean()  # axis=0, 
+                        self.true_spec_std = self.spectra.std()  # axis=0, 
+                elif norm == 'zscore':
+                    # Two-stage: global scalar normalization, then per-wavelength z-score
+                    if true_spec_mean is not None and true_spec_std is not None:
+                        print("Using pre-computed global normalization values.")
+                        self.true_spec_mean = true_spec_mean
+                        self.true_spec_std = true_spec_std
+                    else:
+                        self.true_spec_mean = self.spectra.mean()
+                        self.true_spec_std = self.spectra.std()
+                    Xg = (self.spectra - self.true_spec_mean) / self.true_spec_std
 
-            # Calculate and store normalization parameters for spectra
-            self.spec_mean = self.spectra.mean(axis=0)
-            self.spec_std = self.spectra.std(axis=0)
-            
-            # Normalize spectra
-            self.spectra = (self.spectra - self.spec_mean) / self.spec_std
+                    if zscore_mean_lambda is not None and zscore_std_lambda is not None:
+                        self.lambda_mean = zscore_mean_lambda
+                        self.lambda_std = zscore_std_lambda
+                        print("Using provided per-wavelength z-score parameters.")
+                    else:
+                        self.lambda_mean = Xg.mean(axis=0)
+                        self.lambda_std = Xg.std(axis=0)
+                    eps = 1e-6
+                    self.lambda_std = jnp.where(self.lambda_std < eps, eps, self.lambda_std)
+                    self.spectra = (Xg - self.lambda_mean) / self.lambda_std
+                else:
+                    raise ValueError(f"Invalid normalization method: {norm}")
+
+                # Perform per-spectrum normalization for the autoencoder
+                if norm in ('per-spectra', 'global'):
+                    self.spectra = (self.spectra - self.true_spec_mean) / self.true_spec_std
+            else:
+                self.true_spec_mean = None
+                self.true_spec_std = None
+
+            # Optionally compute per-wavelength stats after normalization
+            if compute_lambda_stats:
+                self.lambda_mean = self.spectra.mean(axis=0)
+                self.lambda_std = self.spectra.std(axis=0)
+
 
         if split is not None:
             # Apply the split to all relevant arrays
@@ -160,11 +155,9 @@ class SpectralDatasetSynthesizer:
             self.ages = self.ages[split]
             self.metallicities = self.metallicities[split]
             self.conditions = self.conditions[split]
-
-    def unnormalize_spectrum(self, spectrum):
-        """Un-normalizes a single spectrum using the stored dataset parameters."""
-        # return 10**((spectrum * self.spec_std) + self.spec_mean)
-        return (spectrum * self.spec_std) + self.spec_mean
+            # Also split the true mean/std
+            self.true_spec_mean = self.true_spec_mean[split]
+            self.true_spec_std = self.true_spec_std[split]
 
     def unnormalize_age(self, norm_age):
         """Un-normalizes a single age value."""

@@ -85,14 +85,14 @@ def create_train_state(rng, model, input_shape, learning_rate, weight_decay):
 def train_step(state, batch, rng):
     """Performs a single training step for the regressor."""
     dropout_rng = jax.random.fold_in(rng, state.step)
-
+        
     def loss_fn(params):
         pred_latent = state.apply_fn(
             {'params': params}, batch['conditions'], training=True, rngs={'dropout': dropout_rng}
         )
         loss = jnp.mean((pred_latent - batch['latent']) ** 2)
         return loss, pred_latent
-
+    
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, pred_latent), grads = grad_fn(state.params)
     
@@ -171,7 +171,7 @@ def train_and_evaluate(
     patience_counter = 0
     train_metrics_history, val_metrics_history = [], []
     best_params = None
-
+    
     for epoch in range(num_epochs):
         # Training
         epoch_train_metrics = []
@@ -189,7 +189,7 @@ def train_and_evaluate(
             batch = {'conditions': val_dataset.conditions[i:i + batch_size], 'latent': val_latent[i:i + batch_size]}
             metrics = eval_step(state, batch)
             epoch_val_metrics.append(metrics)
-
+        
         # Aggregate and log metrics
         train_epoch_metrics = {k: np.mean([m[k] for m in epoch_train_metrics]) for k in epoch_train_metrics[0]}
         val_epoch_metrics = {k: np.mean([m[k] for m in epoch_val_metrics]) for k in epoch_val_metrics[0]}
@@ -207,16 +207,16 @@ def train_and_evaluate(
             best_params = state.params
         else:
             patience_counter += 1
-        
+            
         if trial:
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
-        
+                
         if patience_counter >= patience:
             print(f"Early stopping at epoch {epoch + 1}...")
             break
-            
+    
     if save_path and best_params is not None:
         save_regressor(model, best_params, save_path)
         if verbose:
@@ -235,7 +235,7 @@ def plot_training_history(train_metrics, val_metrics, save_path):
     """
     epochs = range(1, len(train_metrics) + 1)
     plt.figure(figsize=(12, 5))
-
+    
     # Plot Loss
     plt.subplot(1, 2, 1)
     plt.plot(epochs, np.log10([m['loss'] for m in train_metrics]), label='Train Loss')
@@ -243,7 +243,7 @@ def plot_training_history(train_metrics, val_metrics, save_path):
     plt.xlabel('Epoch')
     plt.ylabel('Log10(Loss)')
     plt.legend()
-
+    
     # Plot MSE
     plt.subplot(1, 2, 2)
     plt.plot(epochs, np.log10([m['mse'] for m in train_metrics]), label='Train MSE')
@@ -251,7 +251,7 @@ def plot_training_history(train_metrics, val_metrics, save_path):
     plt.xlabel('Epoch')
     plt.ylabel('MSE')
     plt.legend()
-
+    
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
@@ -265,7 +265,7 @@ def create_latent_representations(autoencoder, autoencoder_state, dataset, batch
     def encode_batch(spectra):
         variables = {'params': autoencoder_state.params, 'batch_stats': autoencoder_state.batch_stats}
         return autoencoder.apply(variables, spectra, method='encode', training=False)
-
+    
     for i in range(0, len(dataset.spectra), batch_size):
         batch_spectra = dataset.spectra[i:i + batch_size]
         latent_batch = encode_batch(batch_spectra)
@@ -288,19 +288,21 @@ def main():
     print(f"JAX devices: {jax.devices()}")
     
     # Load the trained autoencoder
-    autoencoder_path = 'models/best_autoencoder.msgpack'
-    autoencoder, autoencoder_state = load_autoencoder(autoencoder_path)
+    autoencoder_path = 'models/autoencoder_simple_dense.msgpack'
+    # load_model returns (model, state, norm_params). We don't need norm_params here.
+    autoencoder, autoencoder_state, _ = load_autoencoder(autoencoder_path)
     latent_dim = autoencoder.latent_dim
     
     # Load the dataset
     N_samples = int(1e4)
     grid_dir, grid_name = sys.argv[1], sys.argv[2]
-    train_dataset, val_dataset, test_dataset, rng = load_data_regressor(grid_dir, grid_name, N_samples)
-    
+    train_dataset, val_dataset, test_dataset = load_data_regressor(grid_dir, grid_name, N_samples)
+    rng = jax.random.PRNGKey(0)
+
     # Create latent representations
     train_latent = create_latent_representations(autoencoder, autoencoder_state, train_dataset)
     val_latent = create_latent_representations(autoencoder, autoencoder_state, val_dataset)
-
+    
     # Initialize the regressor model
     model = RegressorMLP(
         hidden_dims=(512, 256),

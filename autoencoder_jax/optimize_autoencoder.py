@@ -7,8 +7,8 @@ def objective(trial, train_dataset, test_dataset, rng):
     """Optuna objective function."""
     
     # Suggest hyperparameters
-    latent_dim = trial.suggest_int('latent_dim', 32, 256)
-    n_layers = trial.suggest_int('n_layers', 1, 4)
+    latent_dim = trial.suggest_int('latent_dim', 128, 512)
+    n_layers = trial.suggest_int('n_layers', 1, 5)
     
     encoder_features = []
     last_layer_size = 2048
@@ -27,7 +27,7 @@ def objective(trial, train_dataset, test_dataset, rng):
         raise optuna.exceptions.TrialPruned("Could not form a valid encoder architecture.")
     
     decoder_features = encoder_features[::-1]
-    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.0, 0.2)
     learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
     batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
     activation_function = trial.suggest_categorical('activation_function', ['relu', 'parametric_gated'])

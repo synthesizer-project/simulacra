@@ -127,7 +127,7 @@ def main():
 
     grid_dir, grid_name, autoencoder_path, regressor_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
     
-    _, _, test_dataset = load_data_regressor(grid_dir, grid_name, n_samples=int(1e3))
+    _, _, test_dataset = load_data_regressor(grid_dir, grid_name, n_samples=int(1e2))
     
     print(f"Loading autoencoder from {autoencoder_path}...")
     autoencoder, autoencoder_state, norm_params = load_autoencoder(autoencoder_path)
