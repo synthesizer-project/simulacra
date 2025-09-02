@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import os
 
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 from train_autoencoder import load_model as load_autoencoder_model
 from train_norm_mlp import load_norm_mlp_model
 

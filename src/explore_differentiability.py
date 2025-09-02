@@ -10,7 +10,7 @@ from typing import Tuple
 
 from train_autoencoder import SpectrumAutoencoder
 from train_regressor import RegressorMLP
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 
 
 def load_models(autoencoder_path, regressor_path, spectrum_dim, latent_dim):

@@ -12,7 +12,7 @@ Description:
 CLI:
   python train_norm_mlp.py <grid_dir> <grid_name>
                            [--samples N] [--epochs E] [--batch-size B] 
-                           [--save PATH] [--per-wavelength]
+                           [--save PATH] [--per-wavelength] [--wl-min A] [--wl-max B]
 
 Arguments:
 - grid_dir: Directory containing the spectral grid HDF5 files.
@@ -46,7 +46,7 @@ from tqdm import tqdm
 from typing import Sequence, Dict
 import optuna
 
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 
 def save_model(model, params, model_path):
     """Saves the MLP model state and hyperparameters to a single file."""
@@ -312,9 +312,14 @@ def main():
     batch_size = get_arg('--batch-size', int) or batch_size
     save_path = get_arg('--save', str) or save_path
     per_wavelength = has_flag('--per-wavelength')
+    wl_min = get_arg('--wl-min', float)
+    wl_max = get_arg('--wl-max', float)
 
     # --- Load Data ---
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=N_samples)
+    dataset = SpectralDatasetSynthesizer(
+        grid_dir=grid_dir, grid_name=grid_name, num_samples=N_samples,
+        wl_min=wl_min, wl_max=wl_max
+    )
     rng = jax.random.PRNGKey(0)
     perm = jax.random.permutation(rng, len(dataset))
     split = int(0.8 * len(dataset))

@@ -47,8 +47,8 @@ from flax.training import train_state
 from flax import serialization
 import optuna
 
-from grids import SpectralDatasetSynthesizer
-from activations import ParametricGatedActivation
+from src.grids import SpectralDatasetSynthesizer
+from src.activations import ParametricGatedActivation
 
 
 def save_model(model, state, dataset, model_path):
@@ -65,6 +65,8 @@ def save_model(model, state, dataset, model_path):
     norm_params = {
         'spec_mean': dataset.true_spec_mean,
         'spec_std': dataset.true_spec_std,
+        'wavelength': np.array(dataset.wavelength),
+        'mode': getattr(dataset, 'norm_mode', 'unknown'),
     }
     state_dict = {
         'params': state.params,
@@ -490,12 +492,14 @@ def train_and_evaluate(
     
     return state, train_losses, test_losses, best_test_loss
 
-def load_data(grid_dir, grid_name, n_samples, norm_mode: str = 'per-spectra'):
+def load_data(grid_dir, grid_name, n_samples, norm_mode: str = 'per-spectra', wl_min: float | None = None, wl_max: float | None = None):
     dataset = SpectralDatasetSynthesizer(
         grid_dir=grid_dir,
         grid_name=grid_name,
         num_samples=n_samples,
         norm=norm_mode,
+        wl_min=wl_min,
+        wl_max=wl_max,
     )
     rng = jax.random.PRNGKey(0)
     perm = jax.random.permutation(rng, len(dataset))
@@ -559,7 +563,7 @@ def plot_training_validation_loss(
 def main():
     print(f"JAX devices: {jax.devices()}")
     
-    # Basic CLI: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH] [--global-norm] [--no-norm]
+    # Basic CLI: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH] [--global-norm] [--no-norm] [--wl-min A] [--wl-max B]
     if len(sys.argv) < 3:
         print("Usage: python train_autoencoder.py <grid_dir> <grid_name> [--samples N] [--epochs E] [--batch-size B] [--save PATH]")
         sys.exit(1)
@@ -585,6 +589,8 @@ def main():
     num_epochs = get_arg('--epochs', int) or num_epochs
     batch_size = get_arg('--batch-size', int) or batch_size
     save_path = get_arg('--save', str) or save_path
+    wl_min = get_arg('--wl-min', float)
+    wl_max = get_arg('--wl-max', float)
     use_global_norm = has_flag('--global-norm')
     use_no_norm = has_flag('--no-norm')
 
@@ -595,7 +601,9 @@ def main():
         norm_mode = 'global' if use_global_norm else 'per-spectra'
         norm_label = norm_mode
     print(f"Normalization mode: {norm_label}")
-    train_dataset, test_dataset, rng = load_data(grid_dir, grid_name, N_samples, norm_mode=norm_mode)
+    train_dataset, test_dataset, rng = load_data(
+        grid_dir, grid_name, N_samples, norm_mode=norm_mode, wl_min=wl_min, wl_max=wl_max
+    )
     
     print("--- Using Standard Dense Architecture ---")
     model = SpectrumAutoencoder(

@@ -12,7 +12,7 @@ from flax import serialization
 
 from autoencoder import SpectrumAutoencoder
 from regressor import RegressorMLP
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 
 
 def load_models(autoencoder_path, regressor_path, spectrum_dim, latent_dim):

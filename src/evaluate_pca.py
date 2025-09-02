@@ -1,6 +1,4 @@
 import sys
-sys.path.append('..')
-
 import os
 import numpy as np
 import h5py
@@ -75,6 +73,94 @@ def plot_error_distribution(errors, save_path):
     plt.close()
 
 
+def plot_reconstruction_examples(true_log_spectra, recon_log_spectra, wavelengths, 
+                                conditions, save_dir, n_examples=5, wl_min=2000.0, wl_max=10000.0):
+    """Plot individual reconstruction examples.
+    
+    Args:
+        true_log_spectra: Ground truth log-flux spectra
+        recon_log_spectra: Reconstructed log-flux spectra
+        wavelengths: Wavelength array
+        conditions: Physical conditions (age, metallicity) - should be denormalized
+        save_dir: Directory to save plots
+        n_examples: Number of examples to plot
+        wl_min: Minimum wavelength for plotting
+        wl_max: Maximum wavelength for plotting
+    """
+    print(f"Plotting {n_examples} PCA reconstruction examples...")
+    
+    # Apply wavelength mask for plotting
+    mask = (wavelengths >= wl_min) & (wavelengths <= wl_max)
+    wavelengths_plot = wavelengths[mask]
+    true_plot = true_log_spectra[:, mask]
+    recon_plot = recon_log_spectra[:, mask]
+    
+    # Select random examples
+    n_spectra = len(true_log_spectra)
+    indices = np.random.choice(n_spectra, min(n_examples, n_spectra), replace=False)
+    
+    for i, idx in enumerate(indices):
+        plt.figure(figsize=(14, 10))
+        
+        # Full spectrum comparison (log space)
+        plt.subplot(3, 1, 1)
+        plt.plot(wavelengths_plot, true_plot[idx], label='True', alpha=0.8, linewidth=1.5, color='blue')
+        plt.plot(wavelengths_plot, recon_plot[idx], label='PCA Reconstruction', alpha=0.8, linewidth=1.5, 
+                linestyle='--', color='red')
+        plt.xlabel('Wavelength (Å)')
+        plt.ylabel('Log Flux')
+        plt.legend()
+        
+        # Extract physical conditions for title
+        if len(conditions[idx]) >= 2:
+            age, metallicity = conditions[idx, 0], conditions[idx, 1]
+            plt.title(f'PCA Spectrum Reconstruction - Age={age:.2f} Gyr, Z={metallicity:.4f}')
+        else:
+            plt.title(f'PCA Spectrum Reconstruction - Example {i+1}')
+        plt.grid(True, alpha=0.3)
+        plt.xlim(wl_min, wl_max)
+        
+        # Residual in log space
+        plt.subplot(3, 1, 2)
+        residual_log = recon_plot[idx] - true_plot[idx]
+        plt.plot(wavelengths_plot, residual_log, color='green', alpha=0.7, linewidth=1.5)
+        plt.axhline(0, color='black', linestyle='--', alpha=0.5)
+        plt.xlabel('Wavelength (Å)')
+        plt.ylabel('Residual (Log)')
+        plt.title('Residual: Reconstructed - True (Log Space)')
+        plt.grid(True, alpha=0.3)
+        plt.xlim(wl_min, wl_max)
+        
+        # Fractional error in linear space
+        plt.subplot(3, 1, 3)
+        true_linear = 10**true_plot[idx]
+        recon_linear = 10**recon_plot[idx]
+        frac_error = (recon_linear - true_linear) / (true_linear + 1e-9)
+        plt.plot(wavelengths_plot, frac_error * 100, color='red', alpha=0.7, linewidth=1.5)
+        plt.axhline(0, color='black', linestyle='--', alpha=0.5)
+        plt.axhline(1, color='blue', linestyle=':', alpha=0.7, label='±1%')
+        plt.axhline(-1, color='blue', linestyle=':', alpha=0.7)
+        plt.xlabel('Wavelength (Å)')
+        plt.ylabel('Fractional Error (%)')
+        plt.title('Fractional Error in Linear Flux')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.xlim(wl_min, wl_max)
+        
+        # Compute and display error statistics for this spectrum
+        mean_abs_frac_error = np.mean(np.abs(frac_error)) * 100
+        rms_frac_error = np.sqrt(np.mean(frac_error**2)) * 100
+        plt.text(0.02, 0.95, f'Mean |Error|: {mean_abs_frac_error:.3f}%\nRMS Error: {rms_frac_error:.3f}%', 
+                transform=plt.gca().transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f'pca_reconstruction_example_{i}.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    print(f"Saved {n_examples} reconstruction examples to {save_dir}")
+
+
 def _select_pca_group(f, group_name=None):
     if group_name and group_name in f:
         return f[group_name], group_name
@@ -117,7 +203,7 @@ def main():
     grid_name = os.path.splitext(grid_name_arg)[0] if grid_name_arg.endswith('.hdf5') else grid_name_arg
 
     # Output directory
-    out_dir = os.path.join('evaluation_plots', f'pca_{grid_name}')
+    out_dir = os.path.join('figures/pca_evaluation', f'pca_{grid_name}')
     os.makedirs(out_dir, exist_ok=True)
 
     # Load PCA data
@@ -224,7 +310,32 @@ def main():
         wl_min=wl_min, wl_max=wl_max,
         n_components=pca_components.shape[0], n_train_samples=n_train_samples
     )
-    print(f'Plots saved to: {out_dir}')
+    
+    # Plot individual reconstruction examples
+    print('Generating reconstruction examples...')
+    # Need to get denormalized conditions for proper display
+    # The val_ds.conditions are normalized, so we need to denormalize them
+    if hasattr(val_ds, 'age_mean') and hasattr(val_ds, 'age_std') and hasattr(val_ds, 'met_mean') and hasattr(val_ds, 'met_std'):
+        denormalized_conditions = np.copy(val_ds.conditions)
+        denormalized_conditions[:, 0] = val_ds.conditions[:, 0] * val_ds.age_std + val_ds.age_mean  # Age
+        denormalized_conditions[:, 1] = val_ds.conditions[:, 1] * val_ds.met_std + val_ds.met_mean  # Metallicity
+    else:
+        # Fallback to normalized conditions if denormalization parameters not available
+        denormalized_conditions = val_ds.conditions
+        print("Warning: Using normalized conditions for plot titles (denormalization parameters not available)")
+    
+    plot_reconstruction_examples(
+        true_log_spectra=true_log,
+        recon_log_spectra=recon_log,
+        wavelengths=wavelengths,
+        conditions=denormalized_conditions,
+        save_dir=out_dir,
+        n_examples=5,
+        wl_min=wl_min,
+        wl_max=wl_max
+    )
+    
+    print(f'All plots saved to: {out_dir}')
 
 
 if __name__ == '__main__':

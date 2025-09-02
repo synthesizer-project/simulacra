@@ -9,34 +9,7 @@ This codebase implements **spectrum emulation for stellar population synthesis m
 
 ## Architecture
 
-The system uses a sophisticated **three-component neural architecture**:
-
-### 1. Autoencoder Component
-- **Purpose**: Learns compact latent representations of normalized log-spectra
-- **Architecture**: Dense or convolutional encoder-decoder networks
-- **Features**: Configurable latent dimensions, dropout, batch normalization, custom activations
-- **Output**: Compressed latent space representation of spectral shapes
-
-### 2. Normalization MLP
-- **Purpose**: Predicts per-spectrum normalization parameters (mean, std) from physical conditions
-- **Input**: Normalized age and metallicity
-- **Output**: Spectrum-level mean and standard deviation for denormalization
-- **Architecture**: Small MLP for parameter prediction
-
-### 3. Regression Network
-- **Purpose**: Maps physical parameters directly to autoencoder latent space
-- **Input**: Normalized age and metallicity
-- **Output**: Latent vector that can be decoded to spectrum
-- **Training**: Trained against autoencoder-generated latent vectors
-
 ## Workflow
-
-The complete spectrum generation pipeline:
-1. **Input**: Physical parameters (age, metallicity)
-2. **Normalization MLP**: Predicts spectrum normalization parameters
-3. **Regressor**: Maps parameters to autoencoder latent space
-4. **Autoencoder Decoder**: Reconstructs normalized spectrum from latent vector
-5. **Denormalization**: Apply predicted normalization to get final log-flux spectrum
 
 ## Key Features
 
@@ -55,4 +28,4 @@ This emulation approach is particularly valuable for:
 - **Mock Catalog Generation**: Rapid generation of large synthetic datasets
 - **Parameter Space Exploration**: Efficient sampling of age-metallicity parameter combinations
 - **Real-time Analysis**: Interactive spectral analysis and fitting
->>>>>>> 9d3aa50 (update autoencoder)
+

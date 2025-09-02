@@ -1,6 +1,61 @@
-import sys
-sys.path.append('..')
+"""
+Train a PCA basis for spectra and save it to HDF5.
 
+Overview
+--------
+This script samples synthetic spectra using `SpectralDatasetSynthesizer`,
+applies a chosen normalization scheme, and fits a PCA/SVD basis to the
+normalized log10 spectra. It saves the PCA components, per-wavelength
+centering vector, eigenvalues, the wavelength grid, and the normalization
+scalars required to invert normalization during reconstruction.
+
+Key points
+----------
+- Methods:
+  - "pca": covariance-based PCA on normalized spectra
+  - "svd": SVD-based PCA on normalized spectra (default)
+  - "pca_z" / "svd_z": use an additional per-wavelength z-score stage
+    (dataset_norm set to "zscore").
+- Normalization:
+  - "global" mode stores scalar `true_spec_mean` and `true_spec_std` over
+    the log-spectra; PCA is performed on spectra further centered by a
+    per-wavelength mean (`pca_input_mean`).
+  - "zscore" mode stores per-wavelength `lambda_mean`/`lambda_std` as datasets
+    (`sigma_lambda` is saved as the std), and PCA is performed in that space.
+- Wavelengths:
+  - You can constrain the wavelength range by passing optional `wl_min` and
+    `wl_max` (Å). The saved HDF5 includes the exact `wavelengths` array used.
+- Outputs:
+  - HDF5 at `pca_models/pca_model_<grid_name>.h5` containing a group named
+    `<method>_n_<N>` where `N` is the number of training samples.
+  - The group contains datasets: `pca_components`, `pca_input_mean`,
+    `eigenvalues`, `wavelengths`, and (if z-score) `sigma_lambda`.
+  - Attributes include: `true_spec_mean`, `true_spec_std`, and `method`.
+  - A plot of the first components is saved to
+    `pca_models/pca_components_<grid_name>.png`.
+
+Usage
+-----
+Basic (SVD, global normalization):
+  python src/train_pca.py <grid_dir> <grid_name.hdf5> <n_components> [num_samples] [method]
+
+Examples:
+  # SVD with 20 PCs, 2000 samples, global norm, 2000–10000 Å
+  python src/train_pca.py /path/to/grids bc03-2003-padova00_chabrier03-0.1,100.hdf5 20 2000 svd 2000 10000
+
+  # Covariance PCA with 30 PCs, 5000 samples, z-score norm
+  python src/train_pca.py /path/to/grids bc03-2003-padova00_chabrier03-0.1,100.hdf5 30 5000 pca_z
+
+Integration
+-----------
+- The unified pipeline (`train_unified_regressor.py` / `evaluate_unified_regressor.py`)
+  can load this HDF5 directly. Ensure wavelength limits and normalization
+  settings are consistent between PCA training and regressor training/eval.
+- When using whitening in the regressor pipeline, do so consistently across
+  training and evaluation.
+"""
+
+import sys
 import numpy as np
 import h5py
 import os
@@ -26,13 +81,22 @@ def plot_pca_components(wavelengths, pca_components, output_path):
     plt.close()
 
 def main():
-    if len(sys.argv) not in (4, 5, 6):
-        print("Usage: python train_pca.py <grid_dir> <grid_name> <n_components> [num_samples] [method]")
+    if len(sys.argv) not in (4, 5, 6, 8):
+        print("Usage: python train_pca.py <grid_dir> <grid_name> <n_components> [num_samples] [method] [wl_min] [wl_max]")
         sys.exit(1)
 
     grid_dir, grid_name_arg, n_components = sys.argv[1], sys.argv[2], int(sys.argv[3])
     num_samples = int(sys.argv[4]) if len(sys.argv) >= 5 and sys.argv[4].isdigit() else int(1e3)
     method = None
+    wl_min = None
+    wl_max = None
+    if len(sys.argv) >= 7:
+        try:
+            wl_min = float(sys.argv[-2])
+            wl_max = float(sys.argv[-1])
+        except Exception:
+            wl_min = None
+            wl_max = None
     if len(sys.argv) == 6:
         method = sys.argv[5]
     elif len(sys.argv) == 5 and not sys.argv[4].isdigit():
@@ -65,6 +129,8 @@ def main():
         grid_name=grid_name_arg,
         num_samples=num_samples,
         norm=dataset_norm,
+        wl_min=wl_min,
+        wl_max=wl_max,
         compute_lambda_stats=method.endswith('_z')
     )
     training_spectra = training_dataset.spectra

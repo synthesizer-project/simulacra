@@ -1,5 +1,4 @@
 import flax.linen as nn
-import jax.numpy as jnp
 
 class ParametricGatedActivation(nn.Module):
     """

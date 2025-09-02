@@ -7,7 +7,7 @@ import h5py
 import matplotlib.pyplot as plt
 import subprocess
 
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 
 
 def run_train_pca(grid_dir, grid_name, n_components, num_samples, pca_out_path, method):

@@ -8,13 +8,13 @@ import optax
 import numpy as np
 from flax import serialization
 import matplotlib.pyplot as plt
-from typing import Sequence, Callable
+from typing import Sequence
 from flax.training import train_state as flax_train_state
 import optuna
 
-from grids import SpectralDatasetSynthesizer
+from src.grids import SpectralDatasetSynthesizer
 from train_autoencoder import load_model as load_autoencoder
-from activations import ParametricGatedActivation
+from src.activations import ParametricGatedActivation
 
 
 class RegressorMLP(nn.Module):
@@ -67,17 +67,27 @@ class TrainState(flax_train_state.TrainState):
 
 
 def create_train_state(rng, model, input_shape, learning_rate, weight_decay):
-    """Creates initial regressor training state."""
+    """Creates initial regressor training state with adaptive LR support.
+
+    Mirrors the autoencoder's optimizer pattern using optax.inject_hyperparams,
+    enabling dynamic learning rate adjustment during training and gradient clipping.
+    """
     variables = model.init(rng, jnp.ones(input_shape))
     params = variables['params']
-    
-    scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=0.0, peak_value=learning_rate, warmup_steps=1000,
-        decay_steps=10000, end_value=learning_rate * 1e-3
+
+    optimizer = optax.inject_hyperparams(optax.adamw)(
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        b1=0.9,
+        b2=0.999,
+        eps=1e-8,
     )
-    
-    tx = optax.adamw(learning_rate=scheduler, weight_decay=weight_decay)
-    
+
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optimizer,
+    )
+
     return TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
@@ -160,8 +170,9 @@ def load_regressor(model_path):
 
 def train_and_evaluate(
     model, train_dataset, val_dataset, train_latent, val_latent, num_epochs,
-    batch_size, learning_rate, weight_decay, rng, patience=20, min_delta=1e-4,
-    trial=None, verbose=True, save_path=None
+    batch_size, learning_rate, weight_decay, rng, patience=10, min_delta=1e-4,
+    trial=None, verbose=True, save_path=None,
+    lr_patience: int = 4, lr_factor: float = 0.5, min_lr: float = 1e-7,
 ):
     """Train and evaluate the regressor model."""
     rng, init_rng = jax.random.split(rng)
@@ -171,6 +182,9 @@ def train_and_evaluate(
     patience_counter = 0
     train_metrics_history, val_metrics_history = [], []
     best_params = None
+    # Adaptive LR state
+    current_lr = float(learning_rate)
+    lr_no_improve_epochs = 0
     
     for epoch in range(num_epochs):
         # Training
@@ -197,22 +211,49 @@ def train_and_evaluate(
         val_metrics_history.append(val_epoch_metrics)
         
         if verbose:
-            print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_epoch_metrics['loss']:.4f} | Val MSE: {val_epoch_metrics['mse']:.4f}")
+            print(
+                f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_epoch_metrics['loss']:.4f} | "
+                f"Val MSE: {val_epoch_metrics['mse']:.4f} | LR: {current_lr:.2e}"
+            )
         
         # Early stopping & Optuna pruning
         val_loss = val_epoch_metrics['mse']
         if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             patience_counter = 0
+            lr_no_improve_epochs = 0
             best_params = state.params
+            # if verbose:
+            #     print(f"   -> New best validation loss: {best_val_loss:.6f}")
         else:
             patience_counter += 1
+            lr_no_improve_epochs += 1
+            if verbose:
+                print(
+                    f"   -> No improvement for {patience_counter} epoch(s) "
+                    f"(best {best_val_loss:.6f} vs current {val_loss:.6f}, min_delta {min_delta:.1e})"
+                )
             
         if trial:
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
                 
+        # Reduce LR on plateau
+        if lr_no_improve_epochs >= lr_patience:
+            new_lr = max(current_lr * lr_factor, min_lr)
+            if new_lr < current_lr:
+                current_lr = new_lr
+                # The optimizer is a chain: [clip_by_global_norm, inject_hyperparams(adamw)]
+                # Update the hyperparam learning_rate in-place, mirroring train_norm_mlp.py
+                try:
+                    state.opt_state[1].hyperparams['learning_rate'] = current_lr
+                    if verbose:
+                        print(f"   -> Reducing learning rate to {current_lr:.2e}")
+                except Exception:
+                    pass
+            lr_no_improve_epochs = 0
+
         if patience_counter >= patience:
             print(f"Early stopping at epoch {epoch + 1}...")
             break
@@ -273,7 +314,7 @@ def create_latent_representations(autoencoder, autoencoder_state, dataset, batch
     return jnp.concatenate(latent_vectors)
 
 
-def load_data_regressor(grid_dir, grid_name, n_samples, norm: str = 'per-spectra'):
+def load_data_regressor(grid_dir, grid_name, n_samples, norm: str = 'per-spectra', wl_min: float | None = None, wl_max: float | None = None):
     """Load and preprocess data for the regressor.
 
     Args:
@@ -282,7 +323,10 @@ def load_data_regressor(grid_dir, grid_name, n_samples, norm: str = 'per-spectra
         n_samples: Number of samples to draw
         norm: Normalization mode for spectra ('per-spectra', 'global', or 'zscore')
     """
-    dataset = SpectralDatasetSynthesizer(grid_dir=grid_dir, grid_name=grid_name, num_samples=n_samples, norm=norm)
+    dataset = SpectralDatasetSynthesizer(
+        grid_dir=grid_dir, grid_name=grid_name, num_samples=n_samples, norm=norm,
+        wl_min=wl_min, wl_max=wl_max
+    )
     perm = jax.random.permutation(jax.random.PRNGKey(0), len(dataset))
     train_size, val_size = int(0.7 * len(dataset)), int(0.15 * len(dataset))
     train_ds = SpectralDatasetSynthesizer(parent_dataset=dataset, split=perm[:train_size])
@@ -294,7 +338,7 @@ def load_data_regressor(grid_dir, grid_name, n_samples, norm: str = 'per-spectra
 def main():
     print(f"JAX devices: {jax.devices()}")
 
-    # Parse CLI: python train_regressor.py <grid_dir> <grid_name> [--global-norm] [--no-norm] [--samples N] [--epochs E] [--batch-size B]
+    # Parse CLI: python train_regressor.py <grid_dir> <grid_name> [--global-norm] [--no-norm] [--samples N] [--epochs E] [--batch-size B] [--wl-min A] [--wl-max B]
     args = sys.argv[1:]
     use_global_norm = False
     if "--global-norm" in args:
@@ -330,6 +374,8 @@ def main():
     N_samples = get_arg('--samples', int) or N_samples
     num_epochs = get_arg('--epochs', int) or 200
     batch_size = get_arg('--batch-size', int) or 128
+    wl_min = get_arg('--wl-min', float)
+    wl_max = get_arg('--wl-max', float)
     if use_no_norm:
         norm_mode = None
         norm_label = 'none'
@@ -337,7 +383,9 @@ def main():
         norm_mode = 'global' if use_global_norm else 'per-spectra'
         norm_label = norm_mode
     print(f"Normalization mode: {norm_label}")
-    train_dataset, val_dataset, test_dataset = load_data_regressor(grid_dir, grid_name, N_samples, norm=norm_mode)
+    train_dataset, val_dataset, test_dataset = load_data_regressor(
+        grid_dir, grid_name, N_samples, norm=norm_mode, wl_min=wl_min, wl_max=wl_max
+    )
     rng = jax.random.PRNGKey(0)
 
     # Create latent representations
@@ -346,7 +394,7 @@ def main():
     
     # Initialize the regressor model
     model = RegressorMLP(
-        hidden_dims=(512, 256),
+        hidden_dims=(512, 512),
         latent_dim=latent_dim,
         dropout_rate=0.1,
         activation_name='parametric_gated'

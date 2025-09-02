@@ -8,7 +8,14 @@ from synthesizer.emission_models import IncidentEmission
 from unyt import Msun, yr, angstrom
 
 
-def LHGridSpectra(grid_dir, grid_name, num_samples=1000, seed=None):
+def LHGridSpectra(
+    grid_dir,
+    grid_name,
+    num_samples=1000,
+    seed=None,
+    wl_min: float | None = None,
+    wl_max: float | None = None,
+):
     grid = Grid(grid_dir=grid_dir, grid_name=grid_name, read_lines=False)
 
     N = num_samples
@@ -32,7 +39,14 @@ def LHGridSpectra(grid_dir, grid_name, num_samples=1000, seed=None):
     emodel = IncidentEmission(grid, per_particle=True)
     spec = stars.get_spectra(emodel)
 
-    mask = (grid.lam > 1000 * angstrom) & (grid.lam < 10000 * angstrom)
+    # Apply wavelength limits (Å). Defaults to [2400, 10000] Å if not provided.
+    wl_lo = 2400.0 if wl_min is None else float(wl_min)
+    wl_hi = 10000.0 if wl_max is None else float(wl_max)
+    # Use inclusive bounds when explicit limits are provided to match saved wavelength grids (e.g., PCA models)
+    if wl_min is not None or wl_max is not None:
+        mask = (grid.lam >= wl_lo * angstrom) & (grid.lam <= wl_hi * angstrom)
+    else:
+        mask = (grid.lam > wl_lo * angstrom) & (grid.lam < wl_hi * angstrom)
     spectra = spec.lnu[:, mask]
     wavelength = grid.lam[mask]
 
@@ -56,7 +70,9 @@ class SpectralDatasetSynthesizer:
         true_spec_std=None,
         compute_lambda_stats=False,
         zscore_mean_lambda=None,
-        zscore_std_lambda=None
+        zscore_std_lambda=None,
+        wl_min: float | None = None,
+        wl_max: float | None = None,
     ):
 
         if parent_dataset is not None:
@@ -78,12 +94,24 @@ class SpectralDatasetSynthesizer:
             
         else:
             # Load raw data if this is a new dataset
-            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(grid_dir, grid_name, num_samples, seed=seed)
+            self.spectra, self.wavelength, self.ages, self.metallicities = LHGridSpectra(
+                grid_dir,
+                grid_name,
+                num_samples,
+                seed=seed,
+                wl_min=wl_min,
+                wl_max=wl_max,
+            )
+            # Persist wavelength limits for downstream consumers
+            self.wl_min = float(self.wavelength.min())
+            self.wl_max = float(self.wavelength.max())
             self.n_wavelength = self.spectra.shape[1]
 
             # Reshape and log-transform spectra
             self.spectra = self.spectra.reshape(-1, self.n_wavelength)
             self.spectra = jnp.log10(self.spectra)
+            # Track normalization mode used for spectra
+            self.norm_mode = norm if norm else 'none'
 
             # --- Pre-computation before any splitting ---
             # Store normalization params for physical parameters
